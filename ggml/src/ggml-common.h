@@ -99,6 +99,11 @@ typedef sycl::half2 ggml_half2;
 #define QI2_0 (QK2_0 / 32)
 #define QR2_0 1
 
+#if GGML_MAPLE
+#define QI2_0_128 4
+#define QR2_0_128 1
+#endif
+
 
 #define QI4_0 (QK4_0 / (4 * QR4_0))
 #define QR4_0 2
@@ -190,6 +195,15 @@ typedef struct {
     uint8_t qs[QK2_0 / 4];   // 2 bits per element
 } block_q2_0;
 static_assert(sizeof(block_q2_0) == sizeof(ggml_half) + QK2_0 / 4, "wrong q2_0 block size/padding");
+
+#if GGML_MAPLE
+#define QK2_0_128 128
+typedef struct {
+    ggml_half d;
+    uint8_t qs[QK2_0_128 / 4];
+} block_q2_0_128;
+static_assert(sizeof(block_q2_0_128) == sizeof(ggml_half) + QK2_0_128 / 4, "wrong q2_0_128 block size/padding");
+#endif
 
 #define QK4_0 32
 typedef struct {

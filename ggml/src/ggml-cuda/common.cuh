@@ -985,6 +985,15 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q2_0> {
     static constexpr int qi = QI2_0;
 };
 
+#if GGML_MAPLE
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_0_128> {
+    static constexpr int qk = QK2_0_128;
+    static constexpr int qr = QR2_0_128;
+    static constexpr int qi = QI2_0_128;
+};
+#endif
+
 template<>
 struct ggml_cuda_type_traits<GGML_TYPE_Q4_0> {
     static constexpr int qk = QK4_0;

@@ -11,6 +11,9 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
     switch (type) {
         case GGML_TYPE_Q1_0:    return vec_dot_q1_0_q8_1;
         case GGML_TYPE_Q2_0:    return vec_dot_q2_0_q8_1;
+#if GGML_MAPLE
+        case GGML_TYPE_Q2_0_128: return vec_dot_q2_0_128_q8_1;
+#endif // GGML_MAPLE
         case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1;
         case GGML_TYPE_Q4_1:    return vec_dot_q4_1_q8_1;
         case GGML_TYPE_Q5_0:    return vec_dot_q5_0_q8_1;
@@ -40,6 +43,9 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q1_0:    return VDR_Q1_0_Q8_1_MMVQ;
         case GGML_TYPE_Q2_0:    return VDR_Q2_0_Q8_1_MMVQ;
+#if GGML_MAPLE
+        case GGML_TYPE_Q2_0_128: return VDR_Q2_0_128_Q8_1_MMVQ;
+#endif // GGML_MAPLE
         case GGML_TYPE_Q4_0:    return VDR_Q4_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_1:    return VDR_Q4_1_Q8_1_MMVQ;
         case GGML_TYPE_Q5_0:    return VDR_Q5_0_Q8_1_MMVQ;
@@ -247,6 +253,12 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type
 
 // Host function: returns the max batch size for the current arch+type at runtime.
 int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
+#if GGML_MAPLE
+    if (type == GGML_TYPE_TQ2_0) {
+        return 0;
+    }
+
+#endif // GGML_MAPLE
     // NVIDIA: Volta, Ada Lovelace, and Blackwell always use MMVQ for MUL_MAT_ID.
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         if (cc == GGML_CUDA_CC_VOLTA || cc >= GGML_CUDA_CC_ADA_LOVELACE) {
@@ -280,6 +292,12 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
 }
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
+#if GGML_MAPLE
+    if (type == GGML_TYPE_TQ2_0) {
+        return false;
+    }
+
+#endif // GGML_MAPLE
     if (!ggml_is_quantized(type)) {
         return false;
     }
@@ -1018,6 +1036,14 @@ static void mul_mat_vec_q_switch_type(
                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
             break;
+#if GGML_MAPLE
+        case GGML_TYPE_Q2_0_128:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q2_0_128>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+#endif // GGML_MAPLE
         case GGML_TYPE_Q4_0:
             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_0>
                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
@@ -1295,3 +1321,37 @@ void ggml_cuda_op_mul_mat_vec_q(
 
     GGML_UNUSED_VARS(src1, dst, src1_ddf_i, src1_ncols, src1_padded_row_size);
 }
+
+#if GGML_MOE_CACHE
+void ggml_cuda_moe_cache_mmv(
+    const void * pool, ggml_type type0, const char * act_q8, const int32_t * ids_dev,
+    float * dst_dev, int64_t n_in, int64_t n_out, int64_t n_slots,
+    int64_t slot_stride_bytes, int64_t n_hits, int64_t act_rows, cudaStream_t stream,
+    const void * gate_pool, int glu_op) {
+
+    const int64_t ts0 = ggml_type_size(type0);
+    GGML_ASSERT(slot_stride_bytes % ts0 == 0);
+
+    const int64_t ne10_padded = GGML_PAD(n_in, MATRIX_ROW_PADDING);
+
+    const int64_t s01 = ggml_row_size(type0, n_in) / ts0; // blocks per weight row
+    const int64_t s02 = slot_stride_bytes / ts0;          // blocks per slot
+    const int64_t s11 = ne10_padded / QK8_1;              // q8_1 blocks per act row
+    const int64_t s12 = act_rows * s11;
+
+    ggml_cuda_mm_fusion_args_device fusion_local{};
+    if (gate_pool != nullptr) {
+        fusion_local.gate   = gate_pool;
+        fusion_local.glu_op = (ggml_glu_op)glu_op;
+    }
+
+    // parameter mapping mirrors the ids-branch of ggml_cuda_mul_mat_vec_q with
+    // ne12 = ne13 = 1 (single token), ne1 = n_hits, ne2 = ne3 = 1.
+    mul_mat_vec_q_switch_type(
+        pool, type0, act_q8, ids_dev, fusion_local, dst_dev, n_in,
+        n_out, /*ncols_dst=*/1,             s01, /*stride_col_y=*/s12, /*stride_col_dst=*/n_out*n_hits,
+        n_slots, /*nchannels_y=*/act_rows, /*nchannels_dst=*/n_hits, s02, /*stride_channel_y=*/s11, /*stride_channel_dst=*/n_out,
+        /*ne03=*/1, /*ne3=*/1,              /*s03=*/s02*n_slots, /*s13=*/s12, /*s3=*/n_out*n_hits, /*ids_stride=*/n_hits, stream);
+}
+#endif // GGML_MOE_CACHE
+

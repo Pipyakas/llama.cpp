@@ -28,6 +28,12 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
 
 void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q2_0_ref(x, y, k);
+#if GGML_MAPLE
+}
+
+void quantize_row_q2_0_128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q2_0_128_ref(x, y, k);
+#endif // GGML_MAPLE
 }
 
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
@@ -219,6 +225,41 @@ void ggml_vec_dot_q2_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
         sumf += d0 * sumi;
     }
 
+#if GGML_MAPLE
+    *s = sumf;
+}
+
+void ggml_vec_dot_q2_0_128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK2_0_128;
+    const int nb = n / qk;
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(bx); UNUSED(by); UNUSED(bs); UNUSED(nrc);
+
+    const block_q2_0_128 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; i++) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+        for (int k = 0; k < 4; k++) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            int sumi_block = 0;
+            const uint8_t * GGML_RESTRICT qs = &x[i].qs[k * 8];
+            const int8_t * GGML_RESTRICT qy = yb->qs;
+            for (int b = 0; b < 8; ++b) {
+                const uint8_t byte = qs[b];
+                sumi_block += ((int)((byte >> 0) & 3) - 1) * qy[b*4 + 0];
+                sumi_block += ((int)((byte >> 2) & 3) - 1) * qy[b*4 + 1];
+                sumi_block += ((int)((byte >> 4) & 3) - 1) * qy[b*4 + 2];
+                sumi_block += ((int)((byte >> 6) & 3) - 1) * qy[b*4 + 3];
+            }
+            sumi += d1 * sumi_block;
+        }
+        sumf += d0 * sumi;
+    }
+#endif // GGML_MAPLE
     *s = sumf;
 }
 
@@ -1337,3 +1378,4 @@ void quantize_row_iq4_xs(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, 
     assert(k % QK_K == 0);
     quantize_iq4_xs(x, y, 1, k, NULL);
 }
+

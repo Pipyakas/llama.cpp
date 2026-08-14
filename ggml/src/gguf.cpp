@@ -1,4 +1,9 @@
 #include "ggml.h"
+#if GGML_MAPLE
+#define GGML_COMMON_DECL_C
+#include "ggml-common.h"
+#undef GGML_COMMON_DECL_C
+#endif // GGML_MAPLE
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "gguf.h"
@@ -760,6 +765,44 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
         return nullptr;
     }
     GGML_ASSERT(int64_t(ctx->info.size()) == n_tensors);
+#if GGML_MAPLE
+
+    auto offsets_match = [&](bool legacy_q2_0_128) {
+        size_t expected = 0;
+        bool has_q2_0 = false;
+        for (const gguf_tensor_info & info : ctx->info) {
+            size_t nbytes;
+            if (info.t.type == GGML_TYPE_Q2_0 && legacy_q2_0_128) {
+                has_q2_0 = true;
+                nbytes = size_t(ggml_nelements(&info.t) / QK2_0_128) * ggml_type_size(GGML_TYPE_Q2_0_128);
+            } else {
+                nbytes = ggml_nbytes(&info.t);
+            }
+            if (info.offset != expected) {
+                return false;
+            }
+            expected += GGML_PAD(nbytes, ctx->alignment);
+        }
+        return has_q2_0;
+    };
+
+    // PrismML Bonsai reused serialized type 42 with 128-value blocks. Keep
+    // upstream Q2_0 at 64 values and remap only files whose offsets prove the
+    // legacy layout.
+    if (!offsets_match(false) && offsets_match(true)) {
+        for (gguf_tensor_info & info : ctx->info) {
+            if (info.t.type == GGML_TYPE_Q2_0) {
+                info.t.type = GGML_TYPE_Q2_0_128;
+                info.t.nb[0] = ggml_type_size(info.t.type);
+                info.t.nb[1] = info.t.nb[0] * (info.t.ne[0] / ggml_blck_size(info.t.type));
+                for (int j = 2; j < GGML_MAX_DIMS; ++j) {
+                    info.t.nb[j] = info.t.nb[j - 1] * info.t.ne[j - 1];
+                }
+            }
+        }
+        GGML_LOG_INFO("%s: detected legacy PrismML Q2_0-128 tensor layout\n", __func__);
+    }
+#endif // GGML_MAPLE
 
     // we require the data section to be aligned, so take into account any padding
     if (n_tensors > 0 && !gr.seek(GGML_PAD(gr.tell(), ctx->alignment))) {
@@ -1704,3 +1747,4 @@ void gguf_get_meta_data(const struct gguf_context * ctx, void * data) {
     gguf_write_to_buf(ctx, buf, /*only_meta =*/ true);
     memcpy(data, buf.data(), buf.size());
 }
+

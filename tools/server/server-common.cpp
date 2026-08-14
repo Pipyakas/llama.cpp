@@ -1192,7 +1192,6 @@ json oaicompat_chat_params_parse(
             std::string type = json_value(p, "type", std::string());
             if (type == "image_url") {
                 if (!opt.allow_image) {
-                    throw std::runtime_error("image input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
                 }
 
                 json image_url = json_value(p, "image_url", json::object());
@@ -1205,7 +1204,6 @@ json oaicompat_chat_params_parse(
 
             } else if (type == "input_audio") {
                 if (!opt.allow_audio) {
-                    throw std::runtime_error("audio input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
                 }
 
                 // note: don't need to validate "format", it's redundant
@@ -1220,7 +1218,6 @@ json oaicompat_chat_params_parse(
 
             } else if (type == "input_video") {
                 if (!opt.allow_video) {
-                    throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
                 }
 
                 json input_video = json_value(p, "input_video", json::object());
@@ -1292,14 +1289,30 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    // Parse the OAI "reasoning_effort" field; "none" disables reasoning.
+    // Map common client reasoning levels to the server's token budget.
     if (body.contains("reasoning_effort")) {
         auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));
-        if (reasoning_effort == "none") {
+        if (reasoning_effort == "none" || reasoning_effort == "off") {
             inputs.enable_thinking = false;
             inputs.chat_template_kwargs.erase("reasoning_effort");
-        } else if (!reasoning_effort.empty()) {
-            inputs.chat_template_kwargs["reasoning_effort"] = json(reasoning_effort).dump();
+        } else if (reasoning_effort == "minimal") {
+            body["thinking_budget_tokens"] = 2048;
+        } else if (reasoning_effort == "low") {
+            body["thinking_budget_tokens"] = 4096;
+        } else if (reasoning_effort == "medium") {
+            body["thinking_budget_tokens"] = 8192;
+        } else if (reasoning_effort == "high") {
+            body["thinking_budget_tokens"] = 16384;
+        } else if (reasoning_effort == "xhigh") {
+            body["thinking_budget_tokens"] = 32768;
+        }
+    }
+
+    // Handle Anthropic-style thinking on the OpenAI endpoint.
+    if (body.contains("thinking") && body["thinking"].is_object()) {
+        auto thinking_type = json_value(body["thinking"], "type", std::string());
+        if (thinking_type == "disabled") {
+            inputs.enable_thinking = false;
         }
     }
 
@@ -1350,7 +1363,6 @@ json oaicompat_chat_params_parse(
     }
 
     // Handle "logprobs" field
-    // TODO: The response format of this option is not yet OAI-compatible, but seems like no one really using it; We may need to fix it in the future
     if (json_value(body, "logprobs", false)) {
         if (has_tools && stream) {
             throw std::invalid_argument("logprobs is not supported with tools + stream");

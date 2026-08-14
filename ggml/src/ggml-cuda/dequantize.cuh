@@ -33,6 +33,39 @@ static __device__ __forceinline__ void dequantize_q2_0(const void * vx, const in
     const int byte_index_0 = iqs / 4;
     const int bit_offset_0 = (iqs % 4) * 2;
 
+#if GGML_MAPLE
+    const int byte_index_1 = (iqs + 1) / 4;
+    const int bit_offset_1 = ((iqs + 1) % 4) * 2;
+
+    const int c0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 0x3;
+    const int c1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 0x3;
+
+    v.x = (c0 - 1) * d;
+    v.y = (c1 - 1) * d;
+}
+
+static __device__ __forceinline__ void dequantize_tq2_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq2_0 * x = (const block_tq2_0 *) vx;
+    const float d = x[ib].d;
+
+    const int byte_index_0 = 32 * (iqs / 128) + (iqs % 32);
+    const int bit_offset_0 = ((iqs / 32) % 4) * 2;
+    const int byte_index_1 = 32 * ((iqs + 1) / 128) + ((iqs + 1) % 32);
+    const int bit_offset_1 = (((iqs + 1) / 32) % 4) * 2;
+
+    const int c0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 0x3;
+    const int c1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 0x3;
+    v.x = (c0 - 1) * d;
+    v.y = (c1 - 1) * d;
+}
+
+static __device__ __forceinline__ void dequantize_q2_0_128(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q2_0_128 * x = (const block_q2_0_128 *) vx;
+    const float d = x[ib].d;
+
+    const int byte_index_0 = iqs / 4;
+    const int bit_offset_0 = (iqs % 4) * 2;
+#endif // GGML_MAPLE
     const int byte_index_1 = (iqs + 1) / 4;
     const int bit_offset_1 = ((iqs + 1) % 4) * 2;
 
@@ -450,3 +483,4 @@ static __device__ __forceinline__ void dequantize_mxfp4(const void * vx, const i
         y[j+16] = ggml_cuda_cast<dst_t>(d * kvalues_mxfp4[q4[j] >>  4]*0.5f);
     }
 }
+

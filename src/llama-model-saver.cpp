@@ -30,6 +30,9 @@ bool llama_model_saver_supports_arch(llm_arch arch) {
         case LLM_ARCH_MUSE_GLIMMER:
         case LLM_ARCH_MELLUM:
         case LLM_ARCH_LAGUNA:
+#if GGML_MAPLE
+        case LLM_ARCH_MAPLE:
+#endif
             return false;
         default:
             return true;

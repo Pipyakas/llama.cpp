@@ -61,6 +61,9 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_STARCODER2,       "starcoder2"       },
     { LLM_ARCH_MAMBA,            "mamba"            },
     { LLM_ARCH_MAMBA2,           "mamba2"           },
+#if GGML_MAPLE
+    { LLM_ARCH_MAPLE,            "maple"            },
+#endif
     { LLM_ARCH_JAMBA,            "jamba"            },
     { LLM_ARCH_FALCON_H1,        "falcon-h1"        },
     { LLM_ARCH_XVERSE,           "xverse"           },

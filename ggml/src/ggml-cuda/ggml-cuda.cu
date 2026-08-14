@@ -4,6 +4,9 @@
 
 #include "ggml-cuda/allreduce.cuh"
 #include "ggml-cuda/common.cuh"
+#if GGML_MOE_CACHE
+#include "ggml-cuda/moe-cache.cuh"
+#endif
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
 #include "ggml-cuda/arange.cuh"
@@ -501,6 +504,17 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
             CUDA_CHECK(cudaDeviceSynchronize());
             clear_pool();
             err = ggml_cuda_device_malloc(&ptr, look_ahead_size, device);
+            if (err == cudaErrorMemoryAllocation) {
+                // last resort: the expert cache surrenders its slabs (no-op
+                // when inactive); one degraded decode beats a process abort
+
+                (void)cudaGetLastError();
+#if GGML_MOE_CACHE
+                if (ggml_moe_cache_trim(device) > 0) {
+                    err = ggml_cuda_device_malloc(&ptr, look_ahead_size, device);
+                }
+#endif
+            }
             if (err == cudaSuccess) {
                 GGML_LOG_DEBUG(GGML_CUDA_NAME " pool[%d]: retry succeeded\n", device);
             }
@@ -1790,7 +1804,12 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                                    src0->view_src;
 
     bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
-                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
+                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE &&
+#if GGML_MAPLE
+                             src0->type != GGML_TYPE_TQ2_0;
+#else
+                             true;
+#endif
 
     // fusion is not universally faster on Pascal
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -4938,6 +4957,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_F16:
                     case GGML_TYPE_Q1_0:
                     case GGML_TYPE_Q2_0:
+#if GGML_MAPLE
+                    case GGML_TYPE_Q2_0_128:
+                    case GGML_TYPE_TQ2_0:
+#endif
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:
@@ -4977,6 +5000,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_I32:
                     case GGML_TYPE_Q1_0:
                     case GGML_TYPE_Q2_0:
+#if GGML_MAPLE
+                    case GGML_TYPE_Q2_0_128:
+                    case GGML_TYPE_TQ2_0:
+#endif
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:
@@ -5502,6 +5529,11 @@ ggml_backend_reg_t ggml_backend_cuda_reg() {
 
             const ggml_cuda_device_info & info = ggml_cuda_info();
             const bool virtual_devices = info.device_count > info.physical_device_count;
+
+#if GGML_MOE_CACHE
+            // Register the cache before device objects are created.
+            ggml_moe_cache_register();
+#endif
 
             for (int i = 0; i < info.device_count; i++) {
                 const int physical_id = info.devices[i].physical_device;
