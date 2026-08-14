@@ -1349,7 +1349,9 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
     if (use_mmap) {
         mappings.reserve(files.size());
         mmaps_used.reserve(files.size());
+        mmaps_dev_ranges.reserve(files.size());
         for (const auto & file : files) {
+            mmaps_dev_ranges.emplace_back();
             bool is_numa = false;
 
             auto * dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -1574,7 +1576,24 @@ bool llama_model_loader::load_all_data(
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
             } else {
+#if defined(_WIN32)
+                // Tensors uploaded to a device never need their mmap source
+                // pages again. Read them via the file handle into a staging
+                // buffer instead of faulting the mmap pages into the working
+                // set (Windows RAM saving). Backend set_tensor is synchronous
+                // (e.g. CUDA cudaMemcpyAsync + sync), so the staging buffer
+                // is safe to release at the end of this iteration.
+                const auto & file = files.at(weight->idx);
+                std::vector<uint8_t> staging(n_size);
+                file->seek(weight->offs, SEEK_SET);
+                file->read_raw(staging.data(), n_size);
+                if (check_tensors && !ggml_validate_row_data(cur->type, staging.data(), n_size)) {
+                    throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
+                }
+                ggml_backend_tensor_set(cur, staging.data(), 0, n_size);
+#else
                 ggml_backend_tensor_set(cur, data, 0, n_size);
+#endif
             }
         } else {
             const auto & file = files.at(weight->idx);
@@ -1683,6 +1702,7 @@ bool llama_model_loader::load_all_data(
     if (size_done >= size_data) {
         // unmap offloaded tensors and metadata
         if (use_mmap) {
+            LLAMA_LOG_INFO("%s: final cleanup, size_done=%zu size_data=%zu\n", __func__, size_done, size_data);
             for (uint32_t idx = 0; idx < mappings.size(); idx++) {
                 const auto & mmap_used = mmaps_used.at(idx);
                 auto & mapping = mappings.at(idx);
