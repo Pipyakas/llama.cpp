@@ -172,7 +172,7 @@ endif()
 
 # MoE expert cache (ggml-cuda/ggml-cpu extension in this fork)
 if (NOT DEFINED GGML_MOE_CACHE)
-    set(GGML_MOE_CACHE_DEFAULT ON)
+    set(GGML_MOE_CACHE_DEFAULT OFF)
 endif()
 
 # maple arch / TQ ternary quants / Q2_0_128 type (extension in this fork)

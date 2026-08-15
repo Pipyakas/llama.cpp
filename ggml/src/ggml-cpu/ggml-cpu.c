@@ -1752,6 +1752,33 @@ static void ggml_compute_forward_mul_mat_id(
         const int64_t nr0 = ne01;
         const int64_t nr1 = cne1;
 
+#if GGML_USE_IQK_MULMAT
+        if (type == GGML_TYPE_Q2_0 && vec_dot_type == GGML_TYPE_Q8_0 &&
+                dst->type == GGML_TYPE_F32 && cne1 >= 16) {
+            if (ith == 0) { static int dbg8 = 0; if (dbg8++ < 4) fprintf(stderr, "ID-GEMM: %s nr1=%ld\n", dst->name, (long) cne1); }
+            const char ** cols = (const char **) malloc(sizeof(char *) * cne1);
+            float ** dcols = (float **) malloc(sizeof(float *) * cne1);
+            if (cols && dcols) {
+                for (int64_t iy = 0; iy < cne1; ++iy) {
+                    const struct mmid_row_mapping m = MMID_MATRIX_ROW(cur_a, iy);
+                    const int64_t i11 = m.i1 % ne11;
+                    const int64_t i12 = m.i2;
+                    cols[iy] = (const char *) wdata +
+                        (src1_cont || src1->type != vec_dot_type
+                        ? (i11      + i12*ne11)*row_size
+                        : (i11*nb11 + i12*nb12));
+                    dcols[iy] = (float *) ((char *) dst->data + (m.i1*nb1 + i12*nb2));
+                }
+                if (iqk_gemm_q2_0_q8_0_cols(nr0, cne1, ne00,
+                        src0_cur, nb01, cols, dcols, ith, nth)) {
+                    free(cols); free(dcols);
+                    continue;
+                }
+            }
+            free(cols); free(dcols);
+        }
+#endif
+
         int chunk_size = 16;
         if (nr0 == 1 || nr1 == 1) {
             chunk_size = 64;
@@ -1817,6 +1844,12 @@ static void ggml_compute_forward_mul_mat_id(
 /////////////////////////////////
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
+    static int dbg6 = 0;
+    if (dbg6++ < 80 && params->ith == 0) {
+        fprintf(stderr, "CF: op=%d %s t0=%d ne11=%ld\n", (int) tensor->op, tensor->name,
+                tensor->src[0] ? (int) tensor->src[0]->type : -1,
+                tensor->src[1] ? (long) tensor->src[1]->ne[1] : -1);
+    }
     GGML_ASSERT(params);
 
     if (tensor->op == GGML_OP_NONE || ggml_is_empty(tensor)) {

@@ -1305,6 +1305,98 @@ void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
+
+void ggml_vec_dot_q2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK2_0;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q2_0 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+    float sumf = 0;
+    int ib = 0;
+
+#if defined(__AVX512F__)
+    // 2 blocks per iteration (64 weights).
+    // qs byte g holds weights 4g..4g+3 at bits 2s (s=0..3). We expand each byte
+    // into its four 2-bit values, order them by weight index, and use
+    // vpmaddubsw with the (unsigned) 2-bit values against the signed q8
+    // bytes, compensating the "-1" bias with a ones vector.
+    __m512 acc = _mm512_setzero_ps();
+    // permute index (byte order: target t=4g+s <- x_s[g], see kernel comments)
+    const __m512i perm = _mm512_set_epi8(
+        63,62,47,46,61,60,45,44,59,58,43,42,
+        57,56,41,40,55,54,39,38,53,52,37,36,
+        51,50,35,34,49,48,33,32,31,30,15,14,
+        29,28,13,12,27,26,11,10,25,24,9,8,
+        23,22,7,6,21,20,5,4,19,18,3,2,
+        17,16,1,0);
+
+    for (; ib + 1 < nb; ib += 2) {
+        // q2 quants: 16 bytes = 64 two-bit values (qs of block ib and ib+1)
+        const __m512i b = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i *) x[ib].qs));
+
+        const __m512i three = _mm512_set1_epi32(3);
+        const __m512i x0 = _mm512_and_si512(b,                 three);
+        const __m512i x1 = _mm512_and_si512(_mm512_srli_epi32(b, 2), three);
+        const __m512i x2 = _mm512_and_si512(_mm512_srli_epi32(b, 4), three);
+        const __m512i x3 = _mm512_and_si512(_mm512_srli_epi32(b, 6), three);
+
+        const __m512i lo01 = _mm512_unpacklo_epi32(x0, x1);
+        const __m512i lo23 = _mm512_unpacklo_epi32(x2, x3);
+        const __m512i hi01 = _mm512_unpackhi_epi32(x0, x1);
+        const __m512i hi23 = _mm512_unpackhi_epi32(x2, x3);
+
+        const __m512i p_lo = _mm512_packs_epi32(lo01, lo23);
+        const __m512i p_hi = _mm512_packs_epi32(hi01, hi23);
+
+        const __m512i packed = _mm512_packs_epi16(p_lo, p_hi);
+
+        // weight-ordered bytes, each in 0..3 (unsigned)
+        const __m512i q2m = _mm512_permutexvar_epi8(perm, packed);
+
+        // 64 consecutive int8 q8 quants (two blocks)
+        const __m512i q8b = _mm512_inserti64x4(
+                _mm512_loadu_si512((const __m512i *) y[ib].qs),
+                _mm256_loadu_si256((const __m256i *) y[ib+1].qs), 1);
+
+        const __m512i p  = _mm512_maddubs_epi16(q2m, q8b);                       // pair sums
+        const __m512i ps = _mm512_maddubs_epi16(_mm512_set1_epi8(1), q8b);       // q8 pair sums (bias comp)
+
+        const __m512i dot  = _mm512_madd_epi16(p,  _mm512_set1_epi16(1));        // 16 int32: lanes 0-7 = block ib, 8-15 = block ib+1
+        const __m512i dots = _mm512_madd_epi16(ps, _mm512_set1_epi16(1));
+        const __m512i d32  = _mm512_sub_epi32(dot, dots);                        // sum((q2-1)*q8)
+
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[ib].d)   * GGML_CPU_FP16_TO_FP32(y[ib].d);
+        const float d1 = GGML_CPU_FP16_TO_FP32(x[ib+1].d) * GGML_CPU_FP16_TO_FP32(y[ib+1].d);
+
+        const __m512 scale = _mm512_insertf32x8(_mm512_set1_ps(d0), _mm256_set1_ps(d1), 1);
+        acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(d32), scale, acc);
+    }
+
+    sumf = _mm512_reduce_add_ps(acc);
+#endif
+
+    for (; ib < nb; ++ib) {
+        float sumi = 0;
+        const uint8_t * q = x[ib].qs;
+        for (int j = 0; j < qk; ++j) {
+            const int qv = ((q[j/4] >> (2*(j%4))) & 3) - 1;
+            sumi += qv * y[ib].qs[j];
+        }
+        sumf += sumi * (GGML_CPU_FP16_TO_FP32(x[ib].d) * GGML_CPU_FP16_TO_FP32(y[ib].d));
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;
