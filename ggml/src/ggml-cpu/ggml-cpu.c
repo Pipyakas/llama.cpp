@@ -1844,12 +1844,6 @@ static void ggml_compute_forward_mul_mat_id(
 /////////////////////////////////
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
-    static int dbg6 = 0;
-    if (dbg6++ < 80 && params->ith == 0) {
-        fprintf(stderr, "CF: op=%d %s t0=%d ne11=%ld\n", (int) tensor->op, tensor->name,
-                tensor->src[0] ? (int) tensor->src[0]->type : -1,
-                tensor->src[1] ? (long) tensor->src[1]->ne[1] : -1);
-    }
     GGML_ASSERT(params);
 
     if (tensor->op == GGML_OP_NONE || ggml_is_empty(tensor)) {
