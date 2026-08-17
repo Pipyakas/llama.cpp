@@ -2,26 +2,10 @@
 
 Research date: 2026-08-17. Fork commit: `1c3f93f`.
 
-## Native weight paths
-
-Unsloth UD files are mixtures of standard GGML types, not new runtime types.
-`UD-Q4_K_XL` contains Q4_K, Q8_0, Q5_K, Q6_K, and F32 tensors. On the
-fleet's CUDA and x86 CPU backends, these types use native quantized kernels;
-the Q2_0_128 type is the fork-specific exception that required a native CUDA
-path.
-
-On the RTX 2060 (`sm_75`), the quantized-weight CUDA paths unpack values to
-INT8 in registers and use INT8 MMA or DP4A/IMAD. A cubin census found 158,777
-IMMA instructions and 98,448 HMMA instructions. The quantized GEMMs account
-for the INT8 work, not the HMMA work.
-
-## HMMA boundary
-
-The remaining FP16 tensor-core work is expected from flash attention and
-genuinely-F16 tensors such as an F16 vision projector. llama.cpp has no INT8
-attention implementation. Disabling flash attention does not make inference
-INT8-only; it falls back to slower FP16/FP32 attention. Quantizing an F16
-projector to Q8_0 is the practical smaller lever.
+> General research (native kernel coverage, HMMA/int8 analysis, CPU-routed
+> decode bottleneck + streaming experiments) lives on L0 in
+> `NATIVE-QUANTS.md` and `REQUANT-PIPELINE.md`. This file keeps only
+> machine-specific benchmark data.
 
 ## Benchmark caveat
 
@@ -59,3 +43,12 @@ tokens (`q8_0_kld.logits`). The comparison is independent of expert placement:
 
 UD-Q4_K_XL has substantially better quality, while expQ2_0_128 is smaller
 and faster when both are constrained to CPU-routed experts.
+
+## Placement sweep (2026-08-17, decode t/s, no MTP)
+
+R3 Q4_K_XL: all-CPU experts 59.6 -> 26 GPU-expert layers 98.2 (14.9 GB VRAM).
+D1 our quant: full-GPU 76.5 (fits 12 GB) vs all-CPU 41.6. D1 Q4: all-CPU 35.8
+-> 16 GPU 43.9 -> 20 GPU 47.1 (11.9 GB VRAM). L1 our: all-CPU 26.2 -> 24 GPU
+46.7. L1 Q4: all-CPU 24.1 -> 9 GPU 31.9 (7.9 GB VRAM, 11 GPU OOMs).
+D1 AVX-512 rebuild: no decode change (not SIMD-bound). D1 -t 16 +8%; L1 -t 16
+-8% (single-channel). Full detail in L0 REQUANT-PIPELINE.md / NATIVE-QUANTS.md.
