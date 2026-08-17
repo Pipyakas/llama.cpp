@@ -15,6 +15,10 @@
 #include "ggml.h"
 #include "common.h"
 
+#if GGML_USE_IQK_MULMAT
+#include "../iqk/iqk_gemm_q2_0.h"
+#endif
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
 #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
