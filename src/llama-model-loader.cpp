@@ -39,6 +39,7 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_BF16:      name = LLAMA_FTYPE_PREFIX "BF16"; break;
         case LLAMA_FTYPE_MOSTLY_Q1_0:      name = LLAMA_FTYPE_PREFIX "Q1_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q2_0:      name = LLAMA_FTYPE_PREFIX "Q2_0"; break;
+        case LLAMA_FTYPE_MOSTLY_Q2_0_128:  name = LLAMA_FTYPE_PREFIX "Q2_0_128"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_0:      name = LLAMA_FTYPE_PREFIX "Q4_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1:      name = LLAMA_FTYPE_PREFIX "Q4_1"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0:      name = LLAMA_FTYPE_PREFIX "Q5_0"; break;
@@ -767,6 +768,7 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_NVFP4:   ftype = LLAMA_FTYPE_MOSTLY_NVFP4;   break;
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q2_0:    ftype = LLAMA_FTYPE_MOSTLY_Q2_0;    break;
+            case GGML_TYPE_Q2_0_128: ftype = LLAMA_FTYPE_MOSTLY_Q2_0_128; break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
@@ -1349,7 +1351,9 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
     if (use_mmap) {
         mappings.reserve(files.size());
         mmaps_used.reserve(files.size());
+        mmaps_dev_ranges.reserve(files.size());
         for (const auto & file : files) {
+            mmaps_dev_ranges.emplace_back();
             bool is_numa = false;
 
             auto * dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -1556,7 +1560,21 @@ bool llama_model_loader::load_all_data(
             }
             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
 
-            if (check_tensors) {
+            // Tensors that end up in a device (GPU) buffer never need their mmap
+            // source pages again. Read them through the file handle instead of the
+            // mmap so the OS never faults those pages in: on Windows, touched
+            // file-backed pages stay in the working set and cost RAM forever.
+            const bool to_device = cur->buffer != nullptr && !ggml_backend_buffer_is_host(cur->buffer);
+            if (to_device) {
+                const auto & file = files.at(weight->idx);
+                read_buf.resize(n_size);
+                file->seek(weight->offs, SEEK_SET);
+                file->read_raw(read_buf.data(), n_size);
+                data = (uint8_t *) read_buf.data();
+                if (check_tensors && !ggml_validate_row_data(cur->type, data, n_size)) {
+                    throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
+                }
+            } else if (check_tensors) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
                     return std::make_pair(cur, ggml_validate_row_data(cur->type, data, n_size));
                 }));
@@ -1574,7 +1592,24 @@ bool llama_model_loader::load_all_data(
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
             } else {
+#if defined(_WIN32)
+                // Tensors uploaded to a device never need their mmap source
+                // pages again. Read them via the file handle into a staging
+                // buffer instead of faulting the mmap pages into the working
+                // set (Windows RAM saving). Backend set_tensor is synchronous
+                // (e.g. CUDA cudaMemcpyAsync + sync), so the staging buffer
+                // is safe to release at the end of this iteration.
+                const auto & file = files.at(weight->idx);
+                std::vector<uint8_t> staging(n_size);
+                file->seek(weight->offs, SEEK_SET);
+                file->read_raw(staging.data(), n_size);
+                if (check_tensors && !ggml_validate_row_data(cur->type, staging.data(), n_size)) {
+                    throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
+                }
+                ggml_backend_tensor_set(cur, staging.data(), 0, n_size);
+#else
                 ggml_backend_tensor_set(cur, data, 0, n_size);
+#endif
             }
         } else {
             const auto & file = files.at(weight->idx);
@@ -1683,6 +1718,7 @@ bool llama_model_loader::load_all_data(
     if (size_done >= size_data) {
         // unmap offloaded tensors and metadata
         if (use_mmap) {
+            LLAMA_LOG_INFO("%s: final cleanup, size_done=%zu size_data=%zu\n", __func__, size_done, size_data);
             for (uint32_t idx = 0; idx < mappings.size(); idx++) {
                 const auto & mmap_used = mmaps_used.at(idx);
                 auto & mapping = mappings.at(idx);

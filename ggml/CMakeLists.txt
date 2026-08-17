@@ -84,6 +84,14 @@ endif()
 
 option(BUILD_SHARED_LIBS           "ggml: build shared libraries" ${BUILD_SHARED_LIBS_DEFAULT})
 option(GGML_BACKEND_DL             "ggml: build backends as dynamic libraries (requires BUILD_SHARED_LIBS)" OFF)
+option(GGML_MOE_CACHE              "ggml: enable MoE expert cache (CUDA/HIP)" ${GGML_MOE_CACHE_DEFAULT})
+if (GGML_MOE_CACHE)
+    add_compile_definitions(GGML_MOE_CACHE=1)
+endif()
+option(GGML_MAPLE                   "ggml: enable maple arch / TQ ternary quants / Q2_0_128 type" ${GGML_MAPLE_DEFAULT})
+if (GGML_MAPLE)
+    add_compile_definitions(GGML_MAPLE=1)
+endif()
 set(GGML_BACKEND_DIR "" CACHE PATH "ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL")
 
 #
