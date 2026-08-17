@@ -432,6 +432,10 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
         int           il) {
     const int64_t n_seq_tokens = q->ne[2];
 
+    fprintf(stderr, "DBG build_delta_net: S_v=%ld H_v=%ld H_k=%ld n_seq_tokens=%ld fused_ar=%d fused_ch=%d keep=%d\n",
+            (long) v->ne[0], (long) v->ne[1], (long) q->ne[1], (long) n_seq_tokens,
+            cparams.fused_gdn_ar ? 1 : 0, cparams.fused_gdn_ch ? 1 : 0, cparams.n_rs_seq > 0 ? 1 : 0);
+
     if (n_seq_tokens == 1) {
         if (cparams.fused_gdn_ar) {
             return build_delta_net_fused(q, k, v, g, b, s, il);
