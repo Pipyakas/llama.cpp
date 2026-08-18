@@ -1,4 +1,5 @@
 #include "ops.h"
+#include "../ggml-backend-moe-cache.h"
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
@@ -666,6 +667,7 @@ void ggml_compute_forward_add(
             } break;
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -1117,6 +1119,7 @@ void ggml_compute_forward_add1(
             } break;
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -1248,6 +1251,7 @@ void ggml_compute_forward_acc(
         case GGML_TYPE_BF16:
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -3205,6 +3209,15 @@ static void ggml_compute_forward_swiglu_f32(
 
     const int32_t swapped = ggml_get_op_params_i32(dst, 1);
 
+    // MoE expert cache: rows whose gate/up matvecs ran fused on the GPU arrive
+    // pre-activated; thread 0 scatters them into dst inside glu_hits and every
+    // thread skips them here
+    unsigned long long moe_cache_skip = 0;
+    if (src1 && ggml_moe_cache.glu_hits && nr <= 64) {
+        moe_cache_skip = ggml_moe_cache.glu_hits(src0->data, src1->data,
+                                                 dst->data, dst->nb[1], ith);
+    }
+
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
 
@@ -3213,6 +3226,9 @@ static void ggml_compute_forward_swiglu_f32(
     const int ir1 = MIN(ir0 + dr, nr);
 
     for (int i1 = ir0; i1 < ir1; i1++) {
+        if (moe_cache_skip & (1ull << i1)) {
+            continue;
+        }
         float * src0_p = (float *) (src0_d + i1*src0_o);
         float * src1_p = (float *) (src1_d + i1*src1_o);
 
@@ -4651,6 +4667,7 @@ void ggml_compute_forward_out_prod(
     switch (src0->type) {
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -4927,6 +4944,7 @@ void ggml_compute_forward_set(
         case GGML_TYPE_BF16:
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -5152,6 +5170,7 @@ void ggml_compute_forward_get_rows(
     switch (src0->type) {
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -5909,6 +5928,7 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_BF16:
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
+        case GGML_TYPE_Q2_0_128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:

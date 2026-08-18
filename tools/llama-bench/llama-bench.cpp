@@ -469,6 +469,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  --poll <0...100>                                  (default: %s)\n", join(cmd_params_defaults.poll, ",").c_str());
     printf("  -ngl, --n-gpu-layers <n>                          (default: %s)\n", join(cmd_params_defaults.n_gpu_layers, ",").c_str());
     printf("  -ncmoe, --n-cpu-moe <n>                           (default: %s)\n", join(cmd_params_defaults.n_cpu_moe, ",").c_str());
+    printf("  --moe-cache <n>                                   GPU expert cache budget in MiB (0 = off)\n");
     printf("  -sm, --split-mode <none|layer|row|tensor>         (default: %s)\n", join(transform_to_str(cmd_params_defaults.split_mode, split_mode_str), ",").c_str());
     printf("  -mg, --main-gpu <i>                               (default: %s)\n", join(cmd_params_defaults.main_gpu, ",").c_str());
     printf("  -nkvo, --no-kv-offload <0|1>                      (default: %s)\n", join(cmd_params_defaults.no_kv_offload, ",").c_str());
@@ -730,6 +731,31 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = parse_int_range(argv[i]);
                 params.n_cpu_moe.insert(params.n_cpu_moe.end(), p.begin(), p.end());
+            } else if (arg == "--moe-cache") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto v = atoi(argv[i]);
+                if (v < 0) {
+                    invalid_param = true;
+                    break;
+                }
+                if (v == 0) {
+#if defined(_WIN32)
+                    _putenv_s("GGML_CUDA_MOE_CACHE", "0");
+#else
+                    setenv("GGML_CUDA_MOE_CACHE", "0", 1);
+#endif
+                } else {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%d", v);
+#if defined(_WIN32)
+                    _putenv_s("GGML_CUDA_MOE_CACHE_BUDGET_MB", buf);
+#else
+                    setenv("GGML_CUDA_MOE_CACHE_BUDGET_MB", buf, 1);
+#endif
+                }
             } else if (llama_supports_rpc() && (arg == "-rpc" || arg == "--rpc")) {
                 if (++i >= argc) {
                     invalid_param = true;
