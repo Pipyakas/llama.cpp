@@ -104,6 +104,12 @@ struct llama_model_loader {
     size_t size_done = 0;
     size_t size_data = 0;
     std::vector<std::pair<size_t, size_t>> mmaps_used;
+    // per-file byte ranges whose tensors were fully copied to a device (GPU) buffer.
+    // these mmap pages are dead weight after load and can be unmapped to free RAM.
+    std::vector<std::vector<std::pair<size_t, size_t>>> mmaps_dev_ranges;
+    // per-file byte ranges whose tensors stay host-resident (zero-copy mmap).
+    // overlaps with mmaps_dev_ranges (duplicated tensors) must NOT be unmapped.
+    std::vector<std::vector<std::pair<size_t, size_t>>> mmaps_host_ranges;
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
