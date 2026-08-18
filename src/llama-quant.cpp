@@ -440,8 +440,8 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             if (sscanf(name, "blk.%d.", &i_layer) != 1) {
                 throw std::runtime_error(format("Failed to determine layer for tensor %s", name));
             }
-            if (i_layer < 0 || i_layer >= n_layer) {
-                throw std::runtime_error(format("Bad layer %d for tensor %s. Must be in [0, %d)", i_layer, name, n_layer));
+            if (i_layer < 0 || i_layer >= n_layer) { // MTP head blk.40 exempt - clamp
+                i_layer = n_layer - 1;
             }
         }
         return std::make_pair(i_layer, n_layer);
