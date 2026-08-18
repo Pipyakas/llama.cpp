@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <cerrno>
 #include <algorithm>
+#include <cstdlib>
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -594,7 +595,7 @@ struct llama_mmap::impl {
             throw std::runtime_error(format("MapViewOfFile failed: %s", llama_format_win_err(error).c_str()));
         }
 
-        if (prefetch > 0) {
+        if (prefetch > 0 && std::getenv("GGML_MMAP_NO_PREFETCH") == nullptr) {
 #if _WIN32_WINNT >= 0x602
             BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
             HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -622,8 +623,23 @@ struct llama_mmap::impl {
     }
 
     void unmap_fragment(size_t first, size_t last) {
-        GGML_UNUSED(first);
-        GGML_UNUSED(last);
+        if (last <= first || addr == nullptr) {
+            return;
+        }
+#if _WIN32_WINNT >= 0x0A00
+        BOOL (WINAPI *pDiscardVirtualMemory) (PVOID, SIZE_T);
+        HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+        pDiscardVirtualMemory = (decltype(pDiscardVirtualMemory))(void *) GetProcAddress(hKernel32, "DiscardVirtualMemory");
+        if (pDiscardVirtualMemory) {
+            // Drop the physical backing of the file-backed range from the
+            // working set; future access re-faults it in from the file.
+            BOOL ok = pDiscardVirtualMemory((char *) addr + first, last - first);
+            if (!ok) {
+                LLAMA_LOG_WARN("warning: DiscardVirtualMemory failed: %s\n",
+                        llama_format_win_err(GetLastError()).c_str());
+            }
+        }
+#endif
     }
 
     ~impl() {
