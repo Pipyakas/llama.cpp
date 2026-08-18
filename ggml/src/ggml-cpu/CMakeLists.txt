@@ -1,3 +1,5 @@
+option(GGML_IQK "ggml: use IQK optimized CPU matmul kernels" ON)
+
 function(ggml_add_cpu_backend_features cpu_name arch)
     # The feature detection code is compiled as a separate target so that
     # it can be built without the architecture flags
@@ -243,6 +245,12 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml-cpu/arch/x86/quants.c
             ggml-cpu/arch/x86/repack.cpp
             )
+        if (GGML_IQK)
+            list(APPEND GGML_CPU_SOURCES
+                iqk/iqk_gemm_q2_0.cpp
+                )
+            list(APPEND ARCH_DEFINITIONS GGML_USE_IQK_MULMAT)
+        endif()
 
         if (MSVC)
             # instruction set detection for MSVC only

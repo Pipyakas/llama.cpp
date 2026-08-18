@@ -15,6 +15,10 @@
 #include "ggml.h"
 #include "common.h"
 
+#if GGML_USE_IQK_MULMAT
+#include "../iqk/iqk_gemm_q2_0.h"
+#endif
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
 #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
@@ -1733,6 +1737,32 @@ static void ggml_compute_forward_mul_mat_id(
 
         const int64_t nr0 = ne01;
         const int64_t nr1 = cne1;
+
+#if GGML_USE_IQK_MULMAT
+        if (type == GGML_TYPE_Q2_0 && vec_dot_type == GGML_TYPE_Q8_0 &&
+                dst->type == GGML_TYPE_F32 && cne1 >= 16) {
+            const char ** cols = (const char **) malloc(sizeof(char *) * cne1);
+            float ** dcols = (float **) malloc(sizeof(float *) * cne1);
+            if (cols && dcols) {
+                for (int64_t iy = 0; iy < cne1; ++iy) {
+                    const struct mmid_row_mapping m = MMID_MATRIX_ROW(cur_a, iy);
+                    const int64_t i11 = m.i1 % ne11;
+                    const int64_t i12 = m.i2;
+                    cols[iy] = (const char *) wdata +
+                        (src1_cont || src1->type != vec_dot_type
+                        ? (i11      + i12*ne11)*row_size
+                        : (i11*nb11 + i12*nb12));
+                    dcols[iy] = (float *) ((char *) dst->data + (m.i1*nb1 + i12*nb2));
+                }
+                if (iqk_gemm_q2_0_q8_0_cols(nr0, cne1, ne00,
+                        src0_cur, nb01, cols, dcols, ith, nth)) {
+                    free(cols); free(dcols);
+                    continue;
+                }
+            }
+            free(cols); free(dcols);
+        }
+#endif
 
         int chunk_size = 16;
         if (nr0 == 1 || nr1 == 1) {
