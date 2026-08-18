@@ -589,6 +589,8 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         if (thinking_type == "enabled") {
             int budget_tokens = json_value(thinking, "budget_tokens", 10000);
             oai_body["thinking_budget_tokens"] = budget_tokens;
+        } else if (thinking_type == "disabled") {
+            oai_body["chat_template_kwargs"]["enable_thinking"] = false;
         }
     }
 
