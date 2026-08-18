@@ -175,6 +175,11 @@ if (NOT DEFINED GGML_MOE_CACHE)
     set(GGML_MOE_CACHE_DEFAULT OFF)
 endif()
 
+# maple arch / TQ ternary quants / Q2_0_128 type (extension in this fork)
+if (NOT DEFINED GGML_MAPLE)
+    set(GGML_MAPLE_DEFAULT ON)
+endif()
+
 # transition helpers
 function (llama_option_depr TYPE OLD)
     if (${OLD})
@@ -222,6 +227,11 @@ endif()
 # propagate the MoE expert cache option to common/tools targets
 if (GGML_MOE_CACHE)
     add_compile_definitions(GGML_MOE_CACHE=1)
+endif()
+
+# propagate the maple/TQ option to common/tools targets
+if (GGML_MAPLE)
+    add_compile_definitions(GGML_MAPLE=1)
 endif()
 
 #
