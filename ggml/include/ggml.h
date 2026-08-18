@@ -430,7 +430,11 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        // Internal type for the legacy PrismML/Bonsai Q2_0 block geometry.
+        // It is never serialized as a GGUF type; raw type 42 is remapped by
+        // the GGUF loader when its offset layout matches 128-value blocks.
+        GGML_TYPE_Q2_0_128 = 43,
+        GGML_TYPE_COUNT    = 44,
     };
 
     // precision

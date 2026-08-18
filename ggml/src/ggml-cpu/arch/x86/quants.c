@@ -779,8 +779,8 @@ void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     __m128 acc_3 = _mm_setzero_ps();
 
     for (; ib + 1 < nb; ib += 2) {
-        _mm_prefetch(&x[ib] + sizeof(block_q4_0), _MM_HINT_T0);
-        _mm_prefetch(&y[ib] + sizeof(block_q8_0), _MM_HINT_T0);
+        _mm_prefetch((const char *) &x[ib] + sizeof(block_q4_0), _MM_HINT_T0);
+        _mm_prefetch((const char *) &y[ib] + sizeof(block_q8_0), _MM_HINT_T0);
 
         // Compute combined scale for the block 0 and 1
         const __m128 d_0_1 = _mm_set1_ps( GGML_CPU_FP16_TO_FP32(x[ib].d) * GGML_CPU_FP16_TO_FP32(y[ib].d) );
@@ -797,8 +797,8 @@ void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
         bx_1 = _mm_sub_epi8(bx_1, off);
         const __m128i i32_1 = mul_sum_i8_pairs(bx_1, by_1);
 
-        _mm_prefetch(&x[ib] + 2 * sizeof(block_q4_0), _MM_HINT_T0);
-        _mm_prefetch(&y[ib] + 2 * sizeof(block_q8_0), _MM_HINT_T0);
+        _mm_prefetch((const char *) &x[ib] + 2 * sizeof(block_q4_0), _MM_HINT_T0);
+        _mm_prefetch((const char *) &y[ib] + 2 * sizeof(block_q8_0), _MM_HINT_T0);
 
         // Compute combined scale for the block 2 and 3
         const __m128 d_2_3 = _mm_set1_ps( GGML_CPU_FP16_TO_FP32(x[ib + 1].d) * GGML_CPU_FP16_TO_FP32(y[ib + 1].d) );
@@ -1305,6 +1305,7 @@ void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
+
 void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;
@@ -1568,6 +1569,135 @@ void ggml_vec_dot_tq2_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
     UNUSED(y);
     UNUSED(nb);
     ggml_vec_dot_tq2_0_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
+
+// Q2_0: 2-bit weights, values {0,1,2,3} -> {-1,0,1,2}, 64 per block, qs interleaved by 4
+void ggml_vec_dot_q2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK2_0 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const int nb = n / QK2_0;
+    const block_q2_0 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+#if defined(__AVX2__)
+    float sumf = 0.0f;
+
+    const __m128i m3 = _mm_set1_epi8(3);
+    const __m256i ones8  = _mm256_set1_epi8(1);
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (int i = 0; i < nb; ++i) {
+        const __m128i xb = _mm_loadu_si128((const __m128i *) x[i].qs);
+
+        // extract the four 2-bit lanes (per-byte shifts; the &3 mask drops the
+        // cross-byte contamination introduced by the 16-bit shift)
+        const __m128i l0 = _mm_and_si128(xb, m3);
+        const __m128i l1 = _mm_and_si128(_mm_srli_epi16(xb, 2), m3);
+        const __m128i l2 = _mm_and_si128(_mm_srli_epi16(xb, 4), m3);
+        const __m128i l3 = _mm_and_si128(_mm_srli_epi16(xb, 6), m3);
+
+        // deinterleave lanes into weight order: byte k = 2-bit value of weight k
+        const __m128i t0 = _mm_unpacklo_epi8(l0, l2);
+        const __m128i t1 = _mm_unpacklo_epi8(l1, l3);
+        const __m128i t2 = _mm_unpackhi_epi8(l0, l2);
+        const __m128i t3 = _mm_unpackhi_epi8(l1, l3);
+
+        const __m256i xa = MM256_SET_M128I(_mm_unpackhi_epi8(t0, t1), _mm_unpacklo_epi8(t0, t1)); // weights  0..31
+        const __m256i xb_ = MM256_SET_M128I(_mm_unpackhi_epi8(t2, t3), _mm_unpacklo_epi8(t2, t3)); // weights 32..63
+
+        const __m256i ya = _mm256_loadu_si256((const __m256i *) y[2*i + 0].qs);
+        const __m256i yb = _mm256_loadu_si256((const __m256i *) y[2*i + 1].qs);
+
+        // sum((val-1)*y) = sum(val*y) - sum(y), per 32-weight q8_0 block
+        __m256i pa = _mm256_sub_epi16(_mm256_maddubs_epi16(xa, ya), _mm256_maddubs_epi16(ones8, ya));
+        __m256i pb = _mm256_sub_epi16(_mm256_maddubs_epi16(xb_, yb), _mm256_maddubs_epi16(ones8, yb));
+
+        const int sa = hsum_i32_8(_mm256_madd_epi16(pa, ones16));
+        const int sb = hsum_i32_8(_mm256_madd_epi16(pb, ones16));
+
+        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) *
+                (GGML_CPU_FP16_TO_FP32(y[2*i + 0].d) * sa +
+                 GGML_CPU_FP16_TO_FP32(y[2*i + 1].d) * sb);
+    }
+
+    *s = sumf;
+#else
+    UNUSED(x);
+    UNUSED(y);
+    UNUSED(nb);
+    ggml_vec_dot_q2_0_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
+// Q2_0_128: like Q2_0 but 128 weights per block, qs[32], paired with 4x q8_0
+void ggml_vec_dot_q2_0_128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK2_0_128 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const int nb = n / QK2_0_128;
+    const block_q2_0_128 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+#if defined(__AVX2__)
+    float sumf = 0.0f;
+
+    const __m128i m3 = _mm_set1_epi8(3);
+    const __m256i ones8  = _mm256_set1_epi8(1);
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (int i = 0; i < nb; ++i) {
+        int ssum[4];
+
+        for (int h = 0; h < 2; ++h) {
+            const __m128i xb = _mm_loadu_si128((const __m128i *) (x[i].qs + h*16));
+
+            const __m128i l0 = _mm_and_si128(xb, m3);
+            const __m128i l1 = _mm_and_si128(_mm_srli_epi16(xb, 2), m3);
+            const __m128i l2 = _mm_and_si128(_mm_srli_epi16(xb, 4), m3);
+            const __m128i l3 = _mm_and_si128(_mm_srli_epi16(xb, 6), m3);
+
+            const __m128i t0 = _mm_unpacklo_epi8(l0, l2);
+            const __m128i t1 = _mm_unpacklo_epi8(l1, l3);
+            const __m128i t2 = _mm_unpackhi_epi8(l0, l2);
+            const __m128i t3 = _mm_unpackhi_epi8(l1, l3);
+
+            const __m256i xa = MM256_SET_M128I(_mm_unpackhi_epi8(t0, t1), _mm_unpacklo_epi8(t0, t1));
+            const __m256i xb_ = MM256_SET_M128I(_mm_unpackhi_epi8(t2, t3), _mm_unpacklo_epi8(t2, t3));
+
+            const __m256i ya = _mm256_loadu_si256((const __m256i *) y[i*4 + h*2 + 0].qs);
+            const __m256i yb = _mm256_loadu_si256((const __m256i *) y[i*4 + h*2 + 1].qs);
+
+            __m256i pa = _mm256_sub_epi16(_mm256_maddubs_epi16(xa, ya), _mm256_maddubs_epi16(ones8, ya));
+            __m256i pb = _mm256_sub_epi16(_mm256_maddubs_epi16(xb_, yb), _mm256_maddubs_epi16(ones8, yb));
+
+            ssum[h*2 + 0] = hsum_i32_8(_mm256_madd_epi16(pa, ones16));
+            ssum[h*2 + 1] = hsum_i32_8(_mm256_madd_epi16(pb, ones16));
+        }
+
+        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) *
+                (GGML_CPU_FP16_TO_FP32(y[i*4 + 0].d) * ssum[0] +
+                 GGML_CPU_FP16_TO_FP32(y[i*4 + 1].d) * ssum[1] +
+                 GGML_CPU_FP16_TO_FP32(y[i*4 + 2].d) * ssum[2] +
+                 GGML_CPU_FP16_TO_FP32(y[i*4 + 3].d) * ssum[3]);
+    }
+
+    *s = sumf;
+#else
+    UNUSED(x);
+    UNUSED(y);
+    UNUSED(nb);
+    ggml_vec_dot_q2_0_128_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
 #endif
 }
 
