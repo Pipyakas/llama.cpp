@@ -1787,6 +1787,100 @@ static void moe_cache_selftest(void) {
     MOE_CACHE_LOG("[moe-cache-selftest] %s\n", all ? "ALL PASS" : "FAILURES PRESENT");
 }
 
+// ---- bandwidth autotune (FreeToken 'bench bw' equivalent) ------------------------------
+//
+// GGML_CUDA_MOE_CACHE_AUTOTUNE=1 runs a one-shot calibration at registration:
+// pinned host<->device copy bandwidth (what the miss-insert path costs) and
+// host RAM read bandwidth (what pure-CPU expert streaming achieves). Logs the
+// measured rates plus a per-GiB cost model, so hit-rate verdicts in later
+// stats can be read against measured physics instead of guessed.
+
+static struct {
+    bool   done = false;
+    double h2d_gbps = 0, d2h_gbps = 0, ram_read_gbps = 0;
+    int    ram_threads = 1;
+} g_bw;
+
+static void moe_cache_bw_autotune(void) {
+    if (g_bw.done) return;
+    g_bw.done = true;
+
+    const size_t sz = 64u << 20;
+    void * h = nullptr, * d = nullptr;
+    const bool have = cudaHostAlloc(&h, sz, cudaHostAllocDefault) == cudaSuccess &&
+                      cudaMalloc(&d, sz) == cudaSuccess;
+    if (!have) {
+        MOE_CACHE_LOG("[moe-cache] autotune: buffer alloc failed - skipped\n");
+        if (h) cudaFreeHost(h);
+        if (d) cudaFree(d);
+        return;
+    }
+    memset(h, 0x5a, sz);
+    for (int i = 0; i < 3; i++) {           // warm up both directions
+        cudaMemcpyAsync(d, h, sz, cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(h, d, sz, cudaMemcpyDeviceToHost);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const int iters = 8;
+    cudaEvent_t e0 = nullptr, e1 = nullptr;
+    CUDA_CHECK(cudaEventCreate(&e0));
+    CUDA_CHECK(cudaEventCreate(&e1));
+    float ms_h2d = 0.f, ms_d2h = 0.f;
+    CUDA_CHECK(cudaEventRecord(e0));
+    for (int i = 0; i < iters; i++) cudaMemcpyAsync(d, h, sz, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaEventRecord(e1));
+    CUDA_CHECK(cudaEventSynchronize(e1));
+    CUDA_CHECK(cudaEventElapsedTime(&ms_h2d, e0, e1));
+    CUDA_CHECK(cudaEventRecord(e0));
+    for (int i = 0; i < iters; i++) cudaMemcpyAsync(h, d, sz, cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaEventRecord(e1));
+    CUDA_CHECK(cudaEventSynchronize(e1));
+    CUDA_CHECK(cudaEventElapsedTime(&ms_d2h, e0, e1));
+    CUDA_CHECK(cudaEventDestroy(e0));
+    CUDA_CHECK(cudaEventDestroy(e1));
+    g_bw.h2d_gbps = (double) iters * sz / (((double) ms_h2d * 1e-3f) * 1e9);
+    g_bw.d2h_gbps = (double) iters * sz / (((double) ms_d2h * 1e-3f) * 1e9);
+
+    // host RAM read bandwidth: parallel sequential sweep of a 256 MB buffer
+    // (well past LLC), one byte per 64-byte stride so DRAM traffic stays
+    // line-granular; sums defeat dead-code elimination
+    g_bw.ram_threads = (int) std::thread::hardware_concurrency();
+    if (g_bw.ram_threads <  1) g_bw.ram_threads = 1;
+    if (g_bw.ram_threads > 32) g_bw.ram_threads = 32;
+    {
+        const size_t rsz  = 256u << 20;
+        std::vector<unsigned char> buf(rsz, 1);
+        std::atomic<unsigned long long> acc(0);
+        const size_t chunk = rsz / g_bw.ram_threads;
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::thread> ths;
+        for (int t = 0; t < g_bw.ram_threads; t++) {
+            ths.emplace_back([&buf, &acc, chunk, t]() {
+                const unsigned char * p = buf.data() + (size_t) t * chunk;
+                unsigned long long s = 0;
+                for (size_t i = 0; i < chunk; i += 64) s += p[i];
+                acc.fetch_add(s, std::memory_order_relaxed);
+            });
+        }
+        for (auto & th : ths) th.join();
+        const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        g_bw.ram_read_gbps = ((double) g_bw.ram_threads * chunk) / sec / 1e9;
+    }
+
+    const double ms_per_gib_h2d = 1073.741824 / g_bw.h2d_gbps;
+    const double ms_per_gib_ram = 1073.741824 / g_bw.ram_read_gbps;
+    MOE_CACHE_LOG("[moe-cache] autotune: pcie h2d=%.2f GB/s d2h=%.2f GB/s | host ram read=%.2f GB/s (%d threads)\n",
+            g_bw.h2d_gbps, g_bw.d2h_gbps, g_bw.ram_read_gbps, g_bw.ram_threads);
+    MOE_CACHE_LOG("[moe-cache] autotune: miss-stream %.0f ms/GiB over PCIe vs %.0f ms/GiB from RAM in CPU GEMM - %s\n",
+            ms_per_gib_h2d, ms_per_gib_ram,
+            g_bw.h2d_gbps >= g_bw.ram_read_gbps ? "PCIe fast relative to RAM: modest cache gains expected"
+                                                : "PCIe slow relative to RAM: large cache gains expected");
+
+    cudaFreeHost(h);
+    cudaFree(d);
+}
+
 // ---- registration ----------------------------------------------------------------------
 
 void ggml_moe_cache_register(void) {
@@ -1844,6 +1938,9 @@ void ggml_moe_cache_register(void) {
             g.n_dev, g.budget_mb ? "env" : "auto-70%-free", g.inserts_per_plan,
             g.n_workers, g.stats_every);
 
+    if (const char * e = getenv("GGML_CUDA_MOE_CACHE_AUTOTUNE"); e && atoi(e) > 0) {
+        moe_cache_bw_autotune();
+    }
     if (const char * e = getenv("GGML_CUDA_MOE_CACHE_SELFTEST"); e && atoi(e) > 0) {
         moe_cache_selftest();
     }

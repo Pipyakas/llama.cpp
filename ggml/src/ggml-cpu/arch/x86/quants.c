@@ -1018,49 +1018,64 @@ void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const vo
 
 #if defined(__AVX2__)
 
-    const __m128i values128 = _mm_loadu_si128((const __m128i*)kvalues_fp4);
-    const __m128i m4b  = _mm_set1_epi8(0x0f);
-    const __m256i mone = _mm256_set1_epi16(1);
+    // One 256-bit load covers all four sub-blocks; after the lo/hi nibble-plane split,
+    // unpacklo/unpackhi at 64-bit granularity yield [sub0|sub2] and [sub1|sub3], so the
+    // q8 partners are interleaved to match instead of loaded directly.
+    const __m256i values256 = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)kvalues_fp4));
+    const __m256i m4b  = _mm256_set1_epi8(0x0f);
 
-    __m256 accum = _mm256_setzero_ps();
-    for(; ib < nb; ib++){
+    __m256 accumA = _mm256_setzero_ps();
+    __m256 accumB = _mm256_setzero_ps();
+    for (; ib + 1 < nb; ib += 2) {
+        const block_nvfp4 * GGML_RESTRICT pa = x + ib;
+        const block_nvfp4 * GGML_RESTRICT pb = x + ib + 1;
 
-        const __m128i q4bits_01 = _mm_loadu_si128((const __m128i *)(x[ib].qs + 0));
-        const __m128i q4bits_23 = _mm_loadu_si128((const __m128i *)(x[ib].qs + 16));
+        const __m256i q8_a0 = _mm256_loadu_si256((const __m256i *)y[2*ib + 0].qs);
+        const __m256i q8_a1 = _mm256_loadu_si256((const __m256i *)y[2*ib + 1].qs);
+        const __m256i q8_b0 = _mm256_loadu_si256((const __m256i *)y[2*ib + 2].qs);
+        const __m256i q8_b1 = _mm256_loadu_si256((const __m256i *)y[2*ib + 3].qs);
 
-        const __m256i q8_01 = _mm256_loadu_si256((const __m256i *)y[2*ib + 0].qs);
-        const __m256i q8_23 = _mm256_loadu_si256((const __m256i *)y[2*ib + 1].qs);
+        const __m256i bitsA = _mm256_loadu_si256((const __m256i *)pa->qs);
+        const __m256i bitsB = _mm256_loadu_si256((const __m256i *)pb->qs);
 
-        const __m128i q4_01_lo = _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_01, m4b));
-        const __m128i q4_01_hi = _mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_01, 4), m4b));
-        const __m128i q4_23_lo = _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_23, m4b));
-        const __m128i q4_23_hi = _mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_23, 4), m4b));
+        const __m256i loA = _mm256_shuffle_epi8(values256, _mm256_and_si256(bitsA, m4b));
+        const __m256i hiA = _mm256_shuffle_epi8(values256, _mm256_and_si256(_mm256_srli_epi16(bitsA, 4), m4b));
+        const __m256i loB = _mm256_shuffle_epi8(values256, _mm256_and_si256(bitsB, m4b));
+        const __m256i hiB = _mm256_shuffle_epi8(values256, _mm256_and_si256(_mm256_srli_epi16(bitsB, 4), m4b));
 
-        //reordering
-        const __m256i q4_01 = MM256_SET_M128I(_mm_unpackhi_epi64(q4_01_lo,q4_01_hi), _mm_unpacklo_epi64(q4_01_lo,q4_01_hi));
-        const __m256i q4_23 = MM256_SET_M128I(_mm_unpackhi_epi64(q4_23_lo,q4_23_hi),_mm_unpacklo_epi64(q4_23_lo,q4_23_hi));
+        const __m256i q8_02a = _mm256_permute2x128_si256(q8_a0, q8_a1, 0x20);
+        const __m256i q8_13a = _mm256_permute2x128_si256(q8_a0, q8_a1, 0x31);
+        const __m256i q8_02b = _mm256_permute2x128_si256(q8_b0, q8_b1, 0x20);
+        const __m256i q8_13b = _mm256_permute2x128_si256(q8_b0, q8_b1, 0x31);
 
-        const __m256i p01 = mul_add_epi8(q4_01,q8_01);
-        const __m256i p_1 = _mm256_madd_epi16(p01, mone);
+        // mul_sum_i8_pairs_float picks up AVX512VNNI/AVXVNNI dpbusd (and AVXVNNIINT8 dpbssd)
+        // where available and falls back to the maddubs + madd chain otherwise.
+        const __m256 p_1 = mul_sum_i8_pairs_float(_mm256_unpacklo_epi64(loA, hiA), q8_02a);
+        const __m256 p_2 = mul_sum_i8_pairs_float(_mm256_unpackhi_epi64(loA, hiA), q8_13a);
+        const __m256 p_3 = mul_sum_i8_pairs_float(_mm256_unpacklo_epi64(loB, hiB), q8_02b);
+        const __m256 p_4 = mul_sum_i8_pairs_float(_mm256_unpackhi_epi64(loB, hiB), q8_13b);
 
-        const __m256i p23 = mul_add_epi8(q4_23,q8_23);
-        const __m256i p_2 = _mm256_madd_epi16(p23, mone);
+        const float da0 = GGML_CPU_FP16_TO_FP32(y[2*ib].d);
+        const float da1 = GGML_CPU_FP16_TO_FP32(y[2*ib + 1].d);
+        const float db0 = GGML_CPU_FP16_TO_FP32(y[2*ib + 2].d);
+        const float db1 = GGML_CPU_FP16_TO_FP32(y[2*ib + 3].d);
 
-        const float dy0 = GGML_CPU_FP16_TO_FP32(y[2*ib].d);
-        const float dy1 = GGML_CPU_FP16_TO_FP32(y[2*ib+1].d);
+        // lane order within each product matches [sub0|sub2] / [sub1|sub3]
+        const __m256 scalesA = _mm256_set_m128(_mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pa->d[2]) * da1),
+                                               _mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pa->d[0]) * da0));
+        const __m256 scalesC = _mm256_set_m128(_mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pa->d[3]) * da1),
+                                               _mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pa->d[1]) * da0));
+        const __m256 scalesB = _mm256_set_m128(_mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pb->d[2]) * db1),
+                                               _mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pb->d[0]) * db0));
+        const __m256 scalesD = _mm256_set_m128(_mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pb->d[3]) * db1),
+                                               _mm_set1_ps(GGML_CPU_UE4M3_TO_FP32(pb->d[1]) * db0));
 
-        const float s0 = GGML_CPU_UE4M3_TO_FP32(x[ib].d[0]) * dy0;
-        const float s1 = GGML_CPU_UE4M3_TO_FP32(x[ib].d[1]) * dy0;
-        const float s2 = GGML_CPU_UE4M3_TO_FP32(x[ib].d[2]) * dy1;
-        const float s3 = GGML_CPU_UE4M3_TO_FP32(x[ib].d[3]) * dy1;
-
-        const __m256 scales01 = _mm256_set_m128(_mm_set1_ps(s1), _mm_set1_ps(s0));
-        const __m256 scales23 = _mm256_set_m128(_mm_set1_ps(s3), _mm_set1_ps(s2));
-
-        accum = _mm256_fmadd_ps(scales01, _mm256_cvtepi32_ps(p_1), accum);
-        accum = _mm256_fmadd_ps(scales23, _mm256_cvtepi32_ps(p_2), accum);
+        accumA = _mm256_fmadd_ps(scalesA, p_1, accumA);
+        accumA = _mm256_fmadd_ps(scalesC, p_2, accumA);
+        accumB = _mm256_fmadd_ps(scalesB, p_3, accumB);
+        accumB = _mm256_fmadd_ps(scalesD, p_4, accumB);
     }
-    sumf = hsum_float_8(accum);
+    sumf = hsum_float_8(_mm256_add_ps(accumA, accumB));
 
 #elif defined(__AVX__)
 
