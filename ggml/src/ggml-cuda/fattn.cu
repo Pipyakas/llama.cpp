@@ -317,11 +317,14 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q5_1, GGML_TYPE_BF16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_BF16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
+
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_NVFP4, GGML_TYPE_NVFP4)
 #else
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_NVFP4, GGML_TYPE_NVFP4)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
     GGML_ABORT("fatal error");
@@ -349,6 +352,7 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
+        case GGML_TYPE_NVFP4:
             return true;
         default:
             return false;
@@ -453,9 +457,24 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_NONE;
     }
 
+    // The NVFP4 kernels address the cache in whole blocks of QK_NVFP4 elements along the head
+    // dimension, and the tile loaders decode groups of 8 elements that share one sub-block
+    // scale. Head sizes that are not a multiple of the block size would split a block across
+    // rows, so fall back to the unfused attention path for those.
+    if ((K->type == GGML_TYPE_NVFP4 && K->ne[0] % QK_NVFP4 != 0) ||
+        (V->type == GGML_TYPE_NVFP4 && V->ne[0] % QK_NVFP4 != 0)) {
+        return BEST_FATTN_KERNEL_NONE;
+    }
+
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
-    const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    // NVFP4 KV is consumed in its packed form by both kernels: the vector kernel does a dp4a
+    // dot product over the nibbles, the MMA kernel decodes into its SRAM tiles. Neither one
+    // materializes an f16 copy of the cache, so the choice between them is made on the same
+    // grounds as for any other KV type. GGML_NVFP4_NO_VEC forces MMA for A/B testing.
+    static const bool nvfp4_no_vec = getenv("GGML_NVFP4_NO_VEC") != nullptr;
+    const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0
+        && !(K->type == GGML_TYPE_NVFP4 && nvfp4_no_vec);
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
@@ -548,8 +567,13 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     bool need_f16_V = false;
 
     switch (kernel) {
-        case BEST_FATTN_KERNEL_TILE:
         case BEST_FATTN_KERNEL_MMA_F16:
+            // The MMA kernel decodes NVFP4 directly into its shared memory tiles, so the cache
+            // is read in its packed form and never expanded to f16 in VRAM.
+            need_f16_K = K->type != GGML_TYPE_NVFP4;
+            need_f16_V = V->type != GGML_TYPE_NVFP4;
+            break;
+        case BEST_FATTN_KERNEL_TILE:
             need_f16_K = true;
             need_f16_V = true;
             break;

@@ -372,6 +372,88 @@ static __device__ __forceinline__ void quantize_q8_1_to_shared(
     }
 }
 
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_nvfp4(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_nvfp4 * K_nv = (const block_nvfp4 *) K_c;
+    GGML_UNUSED(Q_v);
+
+    constexpr int nib_int = QK_NVFP4/sizeof(int); // 4-byte groups per block
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        // each int covers 4 consecutive elements, always within one sub-block
+        const int64_t ib  = k_KQ / nib_int;
+        const int     iqs = k_KQ % nib_int;
+        const int     s   = iqs / (QK_NVFP4_SUB/sizeof(int));
+        const int     b   = iqs % (QK_NVFP4_SUB/sizeof(int));
+
+        // Byte j of sub-block s holds elem s*16+j in its low nibble and elem s*16+j+8 in
+        // its high nibble, so the aligned int at qs[s*8 + (b&1)*4] decodes to elements
+        // s*16+4*(b&1) .. +3 (even nibbles -> .x) and those +8 (odd nibbles -> .y).
+        const int q4 = get_int_b4(K_nv[ib].qs, s*(QK_NVFP4_SUB/(2*sizeof(int))) + (b & 1));
+        const int2 vt = get_int_from_table_16(q4, kvalues_fp4);
+        const int  v  = b < 2 ? vt.x : vt.y;
+
+        const int   qi  = Q_q8[k_KQ_0/nthreads];
+        const float d   = ggml_cuda_ue4m3_to_fp32(K_nv[ib].d[s]);
+        const float Q_d = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads].x;
+
+        // kvalues_fp4 is the doubled E2M1 table and ggml_cuda_ue4m3_to_fp32 already
+        // folds in the matching 0.5, so the int8 dot product needs no extra scaling.
+        sum += ggml_cuda_dp4a(v, qi, 0) * d * Q_d;
+    }
+
+    return sum;
+}
+
+// ne consecutive V elements starting at i0. The FA vec kernel always uses ne == 4 for
+// quantized V, and i0 is a multiple of 4, so the group never straddles a sub-block:
+// elements i0..i0+3 are 4 consecutive low or high nibbles of one aligned int.
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_nvfp4(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_nvfp4 * x = (const block_nvfp4 *) vx;
+
+    static_assert(ne == 2 || ne == 4, "bad ne");
+
+    const int64_t ib = i0 / QK_NVFP4;
+    const int     r  = i0 % QK_NVFP4;
+    const int     s  = r / QK_NVFP4_SUB;
+    const int     e  = r % QK_NVFP4_SUB; // 0, 4, 8 or 12
+
+    // one scale lookup for the whole group instead of one per element
+    const float d = ggml_cuda_ue4m3_to_fp32(x[ib].d[s]);
+
+    const int  q4 = get_int_b4(x[ib].qs, s*(QK_NVFP4_SUB/(2*sizeof(int))) + ((e/4) & 1));
+    const int2 vt = get_int_from_table_16(q4, kvalues_fp4);
+    const int  v  = e < 8 ? vt.x : vt.y;
+
+    const int8_t * q8 = (const int8_t *) &v;
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+        const half2 dh = __float2half2_rn(d);
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = dh * make_half2(q8[l0 + 0], q8[l0 + 1]);
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = d * q8[l];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "bad type");
+    }
+}
+
 typedef void (*dequantize_V_t)(const void *, void *, const int64_t);
 
 template <typename T, int ne>
@@ -633,6 +715,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_NVFP4) {
+        return vec_dot_fattn_vec_KQ_nvfp4<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -655,6 +739,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_NVFP4) {
+        return dequantize_V_nvfp4<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;

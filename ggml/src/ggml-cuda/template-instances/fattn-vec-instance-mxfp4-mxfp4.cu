@@ -1,0 +1,7 @@
+// MXFP4 KV cache FA vec kernel instantiations (symmetric mxfp4 K / mxfp4 V only).
+
+#include "../fattn-vec.cuh"
+
+DECL_FATTN_VEC_CASE( 64, GGML_TYPE_MXFP4, GGML_TYPE_MXFP4);
+DECL_FATTN_VEC_CASE(128, GGML_TYPE_MXFP4, GGML_TYPE_MXFP4);
+DECL_FATTN_VEC_CASE(256, GGML_TYPE_MXFP4, GGML_TYPE_MXFP4);
