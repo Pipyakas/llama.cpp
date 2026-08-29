@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
+#include <memory>
 #include <cinttypes>
 #include <limits>
 #include <array>
@@ -144,6 +145,71 @@ static void clip_image_convert_f32_to_u8(const clip_image_f32& src, clip_image_u
 #endif
 
 
+
+// ---- read-only file mapping for CPU-resident projector weights ----
+// Lets the vision tower stay on disk until an image request actually touches
+// it: pages fault in on demand and stay evictable. Only usable when the
+// weights live on a host buffer (i.e. --no-mmproj-offload).
+#ifdef _WIN32
+#   ifndef WIN32_LEAN_AND_MEAN
+#       define WIN32_LEAN_AND_MEAN
+#   endif
+#   include <windows.h>
+#else
+#   include <sys/mman.h>
+#   include <sys/stat.h>
+#   include <fcntl.h>
+#   include <unistd.h>
+#endif
+
+struct clip_file_mapping {
+    void * addr = nullptr;
+    size_t size = 0;
+#ifdef _WIN32
+    HANDLE hFile    = INVALID_HANDLE_VALUE;
+    HANDLE hMapping = nullptr;
+#else
+    int fd = -1;
+#endif
+
+    bool open_ro(const char * fname) {
+#ifdef _WIN32
+        hFile = CreateFileA(fname, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE) return false;
+        LARGE_INTEGER sz;
+        if (!GetFileSizeEx(hFile, &sz)) return false;
+        size = (size_t) sz.QuadPart;
+        hMapping = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!hMapping) return false;
+        addr = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+        return addr != nullptr;
+#else
+        fd = ::open(fname, O_RDONLY);
+        if (fd < 0) return false;
+        struct stat st;
+        if (fstat(fd, &st) != 0) return false;
+        size = (size_t) st.st_size;
+        addr = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+        if (addr == MAP_FAILED) { addr = nullptr; return false; }
+        // scattered single-tensor reads, not a sequential scan
+        posix_madvise(addr, size, POSIX_MADV_RANDOM);
+        return true;
+#endif
+    }
+
+    ~clip_file_mapping() {
+#ifdef _WIN32
+        if (addr)     UnmapViewOfFile(addr);
+        if (hMapping) CloseHandle(hMapping);
+        if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+#else
+        if (addr) munmap(addr, size);
+        if (fd >= 0) ::close(fd);
+#endif
+    }
+};
+
 struct clip_ctx {
     clip_model model;
 
@@ -158,6 +224,9 @@ struct clip_ctx {
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
     ggml_backend_buffer_ptr buf;
+
+    // non-null when projector weights are mmap'd instead of read into RAM
+    std::unique_ptr<clip_file_mapping> mapping;
 
 
     int max_nodes = 8192;
@@ -3558,10 +3627,43 @@ struct clip_model_loader {
 
             // alloc memory and offload data
             ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(ctx_clip.backend);
-            ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
-            ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+            // If the projector lives on a host buffer, map the file instead of
+            // reading it: on a text-only workload the vision weights are never
+            // touched and therefore never occupy RAM.
+            bool mapped = false;
+            if (!ctx_clip.no_alloc && ggml_backend_buft_is_host(buft)) {
+                auto m = std::unique_ptr<clip_file_mapping>(new clip_file_mapping());
+                if (m->open_ro(fname.c_str())) {
+                    ctx_clip.buf.reset(ggml_backend_cpu_buffer_from_ptr(m->addr, m->size));
+                    ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                    bool ok = true;
+                    for (auto & t : tensors_to_load) {
+                        ggml_tensor * cur = ggml_get_tensor(ctx_clip.ctx_data.get(), t->name);
+                        auto it_off = tensor_offset.find(t->name);
+                        if (!cur || it_off == tensor_offset.end() ||
+                            it_off->second + ggml_nbytes(cur) > m->size) { ok = false; break; }
+                        ggml_backend_tensor_alloc(ctx_clip.buf.get(), cur,
+                                                  (uint8_t *) m->addr + it_off->second);
+                    }
+                    if (ok) {
+                        ctx_clip.mapping = std::move(m);
+                        mapped = true;
+                        LOG_INF("%s: mmap'd %zu projector tensors from %s (not resident until used)\n",
+                                __func__, tensors_to_load.size(), fname.c_str());
+                    } else {
+                        // fall back to the eager path below
+                        ctx_clip.buf.reset();
+                    }
+                }
+            }
+
+            if (!mapped) {
+                ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
+                ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            }
             // read the weight from file
-            if (!ctx_clip.no_alloc) {
+            if (!ctx_clip.no_alloc && !mapped) {
                 size_t data_loaded = 0;
                 for (auto & t : tensors_to_load) {
                     ggml_tensor * cur = ggml_get_tensor(ctx_clip.ctx_data.get(), t->name);
@@ -3592,7 +3694,7 @@ struct clip_model_loader {
                     }
                 }
                 LOG_DBG("%s: loaded %zu tensors from %s\n", __func__, tensors_to_load.size(), fname.c_str());
-            } else {
+            } else if (!mapped) {
                 LOG_DBG("%s: no_alloc is set, skipping tensor data loading (%zu tensors)\n", __func__, tensors_to_load.size());
             }
             fin.close();
