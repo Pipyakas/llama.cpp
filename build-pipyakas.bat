@@ -79,20 +79,6 @@ echo START_TIME=%date% %time%>> "%STATUS%"
 echo CUDA_ARCH=%ARCHS% CPU_PROFILE=%CPU_PROFILE% GGML_NATIVE=OFF DL=ON CPU_ALL_VARIANTS=OFF>> "%STATUS%"
 echo CPU_NAME=%CPU_NAME% GPU_CC=%GPU_CC%>> "%STATUS%"
 
-REM --- CUDA VS props fix (L1/R2 BuildTools missing CUDA 13.3) ---
-set "SRC_PROPS=C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\BuildCustomizations"
-set "DST_PROPS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VC\v170\BuildCustomizations"
-if exist "%SRC_PROPS%\CUDA 13.3.props" if exist "%DST_PROPS%" (
-  if not exist "%DST_PROPS%\CUDA 13.3.props" (
-    echo [build-pipyakas] copying CUDA 13.3 props to BuildTools
-    copy /Y "%SRC_PROPS%\CUDA 13.3.props" "%DST_PROPS%\" >nul 2>&1
-    copy /Y "%SRC_PROPS%\CUDA 13.3.targets" "%DST_PROPS%\" >nul 2>&1
-    copy /Y "%SRC_PROPS%\CUDA 13.3.xml" "%DST_PROPS%\" >nul 2>&1
-    copy /Y "%SRC_PROPS%\CUDA 13.3.Version.props" "%DST_PROPS%\" >nul 2>&1
-    copy /Y "%SRC_PROPS%\Nvda.Build.CudaTasks.v13.3.dll" "%DST_PROPS%\" >nul 2>&1
-  )
-)
-
 REM also set CUDAToolkit env for R2
 if not defined CUDAToolkit_ROOT if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3" set "CUDAToolkit_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
 if not defined CUDA_PATH if defined CUDAToolkit_ROOT set "CUDA_PATH=%CUDAToolkit_ROOT%"
@@ -105,13 +91,13 @@ if exist "%BUILD%" (
 
 echo [build-pipyakas] cmake configure
 echo CONFIG-START %time%>> "%STATUS%"
-"%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 17 2022" -T cuda=13.3 -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_NATIVE=OFF %CPU_ARGS% -DCMAKE_CUDA_ARCHITECTURES="%ARCHS%" > "%LOGCFG%" 2>&1
+"%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 18 2026" -T cuda=13.3 -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_NATIVE=OFF %CPU_ARGS% -DCMAKE_CUDA_ARCHITECTURES="%ARCHS%" > "%LOGCFG%" 2>&1
 set CFG_EXIT=%ERRORLEVEL%
 if not "%CFG_EXIT%"=="0" (
   echo [build-pipyakas] -T cuda=13.3 failed %CFG_EXIT%, retry without -T
   rmdir /s /q "%BUILD%" 2>nul
   timeout /t 1 >nul
-  "%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 17 2022" -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_NATIVE=OFF %CPU_ARGS% -DCMAKE_CUDA_ARCHITECTURES="%ARCHS%" > "%LOGCFG%" 2>&1
+  "%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 18 2026" -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_NATIVE=OFF %CPU_ARGS% -DCMAKE_CUDA_ARCHITECTURES="%ARCHS%" > "%LOGCFG%" 2>&1
   set CFG_EXIT=%ERRORLEVEL%
 )
 echo CONFIG-EXIT=%CFG_EXIT% %time%>> "%STATUS%"
