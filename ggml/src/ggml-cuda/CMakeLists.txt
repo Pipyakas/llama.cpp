@@ -114,6 +114,7 @@ if (CUDAToolkit_FOUND)
 
     if (GGML_CUDA_FA_ALL_QUANTS)
         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
+        list(FILTER SRCS EXCLUDE REGEX "mxfp4")
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
         add_compile_definitions(GGML_CUDA_FA_ALL_QUANTS)
     else()
