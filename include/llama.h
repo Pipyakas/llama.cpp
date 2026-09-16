@@ -347,6 +347,11 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
+        // path to a sidecar GGUF holding the DeepSeek-V4.1 Engram table
+        // (per_layer_token_embd); when set, it loads from there instead of
+        // the main file so the core file stays small (NULL/empty = disabled)
+        const char * engram_file;
+
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
         bool check_tensors;   // validate model tensor data

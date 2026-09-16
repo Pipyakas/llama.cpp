@@ -488,6 +488,7 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
     };
     handle_url(params.model);
     handle_url(params.mmproj);
+    handle_url(params.engram_file);
     handle_url(params.speculative.draft.mparams);
 
     // optionally, if docker repo is set, resolve it
@@ -512,6 +513,13 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
         common_download_task task;
         task.url        = params.mmproj.url;
         task.local_path = params.mmproj.path;
+        task.opts       = opts;
+        tasks.push_back(task);
+    }
+    if (!params.engram_file.url.empty()) {
+        common_download_task task;
+        task.url        = params.engram_file.url;
+        task.local_path = params.engram_file.path;
         task.opts       = opts;
         tasks.push_back(task);
     }
@@ -2594,6 +2602,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.mmproj.path = value;
         }
     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ"));
+    add_opt(common_arg(
+        {"--engram-file"}, "FILE",
+        "path to a sidecar GGUF holding the DeepSeek-V4.1 Engram table (per_layer_token_embd).\n"
+        "lets the core model file stay small while expert calibration iterates;\n"
+        "the table streams from this file on demand (lazy read)",
+        [](common_params & params, const std::string & value) {
+            params.engram_file.path = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_ENGRAM_FILE"));
+    add_opt(common_arg(
+        {"--engram-file-url"}, "URL",
+        "URL to a DeepSeek-V4.1 engram sidecar file",
+        [](common_params & params, const std::string & value) {
+            params.engram_file.url = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_ENGRAM_FILE_URL"));
     add_opt(common_arg(
         {"-mmu", "--mmproj-url"}, "URL",
         "URL to a multimodal projector file. see tools/mtmd/README.md",

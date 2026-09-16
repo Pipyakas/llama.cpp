@@ -601,6 +601,10 @@ struct common_params {
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 
+    // DeepSeek-V4.1 Engram sidecar: file holding per_layer_token_embd (same tensor
+    // names); lets the core file stay small while expert calibration iterates
+    struct common_params_model engram_file;
+
     // multimodal models (see tools/mtmd)
     struct common_params_model mmproj;
     bool mmproj_use_gpu = true;                 // use GPU for multimodal model

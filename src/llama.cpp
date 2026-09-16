@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -320,6 +321,19 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
             params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides);
 
         ml.lazy.mode = params.lazy_mode;
+
+        // optional engram sidecar (--engram-file): ingest it as extra files of the
+        // main loader, exactly like multi-file .gguf splits, so the tables ride the
+        // normal mmap/lazy/buffer path with zero special-casing downstream
+        if (params.engram_file && params.engram_file[0] != '\0') {
+            std::vector<std::string> engram_splits;
+            llama_model_loader sidecar(
+                nullptr, nullptr, nullptr, params.engram_file, engram_splits, nullptr,
+                params.load_mode, params.check_tensors, params.no_alloc, false,
+                params.kv_overrides, params.tensor_buft_overrides);
+            sidecar.lazy.mode = params.lazy_mode;
+            ml.ingest_sidecar(std::move(sidecar));
+        }
 
         ml.print_info();
         std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));

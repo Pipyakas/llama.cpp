@@ -110,6 +110,8 @@ struct llama_model_loader {
         // lazy tensors are gathered on the host, so no offload setting applies to them
         static ggml_backend_buffer_type_t buft();
 
+        friend struct llama_model_loader;
+
     private:
         std::map<uint32_t, llama_mmap::ranges> ranges;
         std::set<std::string>                  tensors;
@@ -118,6 +120,11 @@ struct llama_model_loader {
     llama_files files;
     llama_ftype ftype;
     llama_fver  fver;
+
+    // ingest a sidecar GGUF (--engram-file) as extra file(s) of this loader, so the
+    // DeepSeek-V4.1 Engram table loads through the normal multi-file machinery
+    // (mmap ranges, lazy read, buffer mapping) with zero special-casing downstream
+    void ingest_sidecar(llama_model_loader && src);
 
     llama_mmaps mappings;
 

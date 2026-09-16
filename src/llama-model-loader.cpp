@@ -864,6 +864,41 @@ const llama_model_loader::llama_tensor_weight & llama_model_loader::require_weig
     return *weight;
 }
 
+void llama_model_loader::ingest_sidecar(llama_model_loader && src) {
+    // merge a sidecar GGUF (--engram-file) into this loader as extra files, exactly
+    // like multi-file .gguf splits: re-index weights, stitch lazy ranges, keep the
+    // sidecar's mmap/file/contexts alive by moving ownership. Downstream
+    // (create_tensor, lazy.add, init_mappings, get_mapping_range, load_all_data) then
+    // handles the tables with zero special-casing.
+    const uint16_t base = (uint16_t) files.size();
+    GGML_ASSERT(base + src.files.size() <= UINT16_MAX);
+    GGML_ASSERT(mappings.empty() && src.mappings.empty() && "ingest before init_mappings");
+    for (auto & f : src.files) {
+        files.emplace_back(std::move(f));
+    }
+    for (auto & c : src.contexts) {
+        contexts.emplace_back(std::move(c));
+    }
+    for (auto & [name, w] : src.weights_map) {
+        if (weights_map.find(name) != weights_map.end()) {
+            throw std::runtime_error(format("invalid sidecar: tensor '%s' is duplicated", name.c_str()));
+        }
+        w.idx = (uint16_t)(w.idx + base);
+        weights_map.emplace(name, std::move(w));
+    }
+    for (auto & [idx, rs] : src.lazy.ranges) {
+        auto & dst = lazy.ranges[(uint32_t)(idx + base)];
+        dst.insert(dst.end(), rs.begin(), rs.end());
+    }
+    for (auto & name : src.lazy.tensors) {
+        lazy.tensors.insert(name);
+    }
+    n_elements  += src.n_elements;
+    n_bytes     += src.n_bytes;
+    n_tensors    = (int) weights_map.size();
+    src.weights_map.clear();
+}
+
 struct ggml_tensor * llama_model_loader::get_tensor_meta(const char * name) const {
     const auto * weight = get_weight(name);
     if (!weight) {
