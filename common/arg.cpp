@@ -2610,14 +2610,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.engram_file.path = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_ENGRAM_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_EMBEDDING}).set_env("LLAMA_ARG_ENGRAM_FILE"));
     add_opt(common_arg(
         {"--engram-file-url"}, "URL",
         "URL to a DeepSeek-V4.1 engram sidecar file",
         [](common_params & params, const std::string & value) {
             params.engram_file.url = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_ENGRAM_FILE_URL"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_EMBEDDING}).set_env("LLAMA_ARG_ENGRAM_FILE_URL"));
     add_opt(common_arg(
         {"-mmu", "--mmproj-url"}, "URL",
         "URL to a multimodal projector file. see tools/mtmd/README.md",
