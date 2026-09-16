@@ -180,10 +180,13 @@ void llama_model_deepseek41::load_arch_tensors(llama_model_loader & ml) {
 
             // The table has hundreds of millions of rows and is far too large to hold in memory,
             // but each token only touches n_cols of them, so read those rows on demand.
+            // With --engram-file the tables live in a sidecar GGUF (same tensor names) so the
+            // core file stays small while calibration iterates; otherwise they come from the
+            // main file as before.
             const std::string embd_name = tn(LLM_TENSOR_ENGRAM_EMBD, "weight", i).str();
             const auto * embd_w = ml.get_weight(embd_name.c_str());
             if (embd_w == nullptr) {
-                throw std::runtime_error(format("%s is missing", embd_name.c_str()));
+                throw std::runtime_error(format("%s is missing (main file and --engram-file)", embd_name.c_str()));
             }
             const int64_t n_rows = embd_w->tensor->ne[1];
 
