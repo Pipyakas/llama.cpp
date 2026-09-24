@@ -1432,24 +1432,29 @@ class DeepseekV41Model(DeepseekV4Model):
                 n_rows * row_bytes / 1e9, tmp_path,
             )
 
-            out = _np.memmap(tmp_path, dtype=_np.uint8, mode="w+", shape=(n_rows, row_bytes))
-            for ci, start in enumerate(range(0, n_rows, rows_per_chunk)):
-                stop = min(start + rows_per_chunk, n_rows)
-                chunk = wsl[start:stop, :].float()
-                if has_scale:
-                    s = self._e8m0_to_float(ssl[start:stop, :])
-                    chunk = chunk * s.repeat_interleave(per_group, 1)[:, :n_cols]
-                out[start:stop] = gguf.quantize(
-                    chunk.cpu().numpy().astype(_np.float32), qtype
-                ).reshape(stop - start, row_bytes)
-                del chunk
-                if ci % 25 == 0:
-                    logger.info("  engram layer %d: %d / %d rows", bid, stop, n_rows)
-            out.flush()
+            # Sequential file write - do NOT np.memmap the full table: Windows
+            # charges the mapping to process commit (~100GB private).
+            with open(tmp_path, "wb") as outf:
+                for ci, start in enumerate(range(0, n_rows, rows_per_chunk)):
+                    stop = min(start + rows_per_chunk, n_rows)
+                    chunk = wsl[start:stop, :].float()
+                    if has_scale:
+                        s = self._e8m0_to_float(ssl[start:stop, :])
+                        chunk = chunk * s.repeat_interleave(per_group, 1)[:, :n_cols]
+                    q = gguf.quantize(
+                        chunk.cpu().numpy().astype(_np.float32), qtype
+                    ).reshape(stop - start, row_bytes)
+                    outf.write(memoryview(q).cast("B"))
+                    del chunk, q
+                    if ci % 25 == 0:
+                        logger.info("  engram layer %d: %d / %d rows", bid, stop, n_rows)
+                outf.flush()
 
         new_name = self.format_tensor_name(gguf.MODEL_TENSOR.ENGRAM_EMBD, bid, ".weight")
-        self.gguf_writer.add_tensor(new_name, out, raw_dtype=qtype)
-        logger.info("engram layer %d: wrote %s as %s", bid, new_name, qtype.name)
+        self.gguf_writer.add_tensor_from_file(
+            new_name, tmp_path, (n_rows, row_bytes), raw_dtype=qtype
+        )
+        logger.info("engram layer %d: staged %s as %s at %s", bid, new_name, qtype.name, tmp_path)
 
         consumed = [weight_name]
         if has_scale:
