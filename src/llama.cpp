@@ -335,6 +335,18 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
             ml.ingest_sidecar(std::move(sidecar));
         }
 
+        // optional PLE sidecar (--ple-file): same multi-file merge, full-precision
+        // blk.*.ple_* tensors stream from the sidecar instead of the core file
+        if (params.ple_file && params.ple_file[0] != '\0') {
+            std::vector<std::string> ple_splits;
+            llama_model_loader sidecar(
+                nullptr, nullptr, nullptr, params.ple_file, ple_splits, nullptr,
+                params.load_mode, params.check_tensors, params.no_alloc, false,
+                params.kv_overrides, params.tensor_buft_overrides);
+            sidecar.lazy.mode = params.lazy_mode;
+            ml.ingest_sidecar(std::move(sidecar));
+        }
+
         ml.print_info();
         std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));
 

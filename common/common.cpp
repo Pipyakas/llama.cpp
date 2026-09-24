@@ -1718,6 +1718,7 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.progress_callback           = params.load_progress_callback;
     mparams.progress_callback_user_data = params.load_progress_callback_user_data;
     mparams.engram_file                 = params.engram_file.path.empty() ? nullptr : params.engram_file.path.c_str();
+    mparams.ple_file                    = params.ple_file.path.empty()    ? nullptr : params.ple_file.path.c_str();
     mparams.no_alloc                    = params.no_alloc;
     mparams.load_mtp                    = params.load_mtp || std::find(params.speculative.types.begin(), params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
 

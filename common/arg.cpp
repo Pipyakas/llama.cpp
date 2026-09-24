@@ -491,6 +491,7 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
     handle_url(params.model);
     handle_url(params.mmproj);
     handle_url(params.engram_file);
+    handle_url(params.ple_file);
     handle_url(params.speculative.draft.mparams);
 
     // optionally, if docker repo is set, resolve it
@@ -522,6 +523,13 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
         common_download_task task;
         task.url        = params.engram_file.url;
         task.local_path = params.engram_file.path;
+        task.opts       = opts;
+        tasks.push_back(task);
+    }
+    if (!params.ple_file.url.empty()) {
+        common_download_task task;
+        task.url        = params.ple_file.url;
+        task.local_path = params.ple_file.path;
         task.opts       = opts;
         tasks.push_back(task);
     }
@@ -2620,6 +2628,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.engram_file.url = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_EMBEDDING}).set_env("LLAMA_ARG_ENGRAM_FILE_URL"));
+    add_opt(common_arg(
+        {"--ple-file"}, "FILE",
+        "path to a sidecar GGUF holding the full-precision Qwen PLE tensors (blk.*.ple_*)\n"
+        "the core model file drops its embedded quantized PLE copy;\n"
+        "the tensors stream from this file on demand (requires mmap)",
+        [](common_params & params, const std::string & value) {
+            params.ple_file.path = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_EMBEDDING}).set_env("LLAMA_ARG_PLE_FILE"));
+    add_opt(common_arg(
+        {"--ple-file-url"}, "URL",
+        "URL to a full-precision Qwen PLE sidecar file",
+        [](common_params & params, const std::string & value) {
+            params.ple_file.url = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_EMBEDDING}).set_env("LLAMA_ARG_PLE_FILE_URL"));
     add_opt(common_arg(
         {"-mmu", "--mmproj-url"}, "URL",
         "URL to a multimodal projector file. see tools/mtmd/README.md",
