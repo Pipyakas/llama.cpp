@@ -110,6 +110,9 @@ void quantize_row_q2_0_ref(const float * GGML_RESTRICT x, block_q2_0 * GGML_REST
 }
 
 // reference implementation for deterministic creation of model files
+// scale uses the ik_llama.cpp least-squares refit (PR 1547/1556): after the
+// initial round, re-solve d so the block best matches the input with x^2
+// weighting. Same layout, strictly lower error, better KV retention.
 void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
 
@@ -132,18 +135,26 @@ void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_REST
         const float d  = max / -8;
         const float id = d ? 1.0f/d : 0.0f;
 
-        y[i].d = GGML_FP32_TO_FP16(d);
-
+        float sumqx = 0, sumq2 = 0;
         for (int j = 0; j < qk/2; ++j) {
-            const float x0 = x[i*qk + 0    + j]*id;
-            const float x1 = x[i*qk + qk/2 + j]*id;
+            const float v0 = x[i*qk + 0    + j];
+            const float v1 = x[i*qk + qk/2 + j];
+            const float x0 = v0*id;
+            const float x1 = v1*id;
 
             const uint8_t xi0 = MIN(15, (int8_t)(x0 + 8.5f));
             const uint8_t xi1 = MIN(15, (int8_t)(x1 + 8.5f));
+            float q0 = (float)xi0 - 8;
+            float q1 = (float)xi1 - 8;
+            float w0 = v0*v0;
+            float w1 = v1*v1;
+            sumqx += w0*q0*v0 + w1*q1*v1;
+            sumq2 += w0*q0*q0 + w1*q1*q1;
 
             y[i].qs[j]  = xi0;
             y[i].qs[j] |= xi1 << 4;
         }
+        y[i].d = GGML_FP32_TO_FP16(sumq2 > 0 ? sumqx/sumq2 : d);
     }
 }
 
