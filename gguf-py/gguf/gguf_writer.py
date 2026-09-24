@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 import os
 import shutil
@@ -45,6 +46,7 @@ class TensorInfo:
     dtype: GGMLQuantizationType
     nbytes: int
     tensor: np.ndarray[Any, Any] | None = None
+    temp_path: str | None = None
 
 
 @dataclass
@@ -66,7 +68,7 @@ class WriterState(Enum):
 class GGUFWriter:
     fout: list[BufferedWriter] | None
     path: Path | None
-    temp_file: tempfile.SpooledTemporaryFile[bytes] | None
+    temp_dir: Path | None
     tensors: list[dict[str, TensorInfo]]
     kv_data: list[dict[str, GGUFValue]]
     state: WriterState
@@ -94,7 +96,8 @@ class GGUFWriter:
         self.endianess = endianess
         self.data_alignment = GGUF_DEFAULT_ALIGNMENT
         self.use_temp_file = use_temp_file
-        self.temp_file = None
+        self.temp_dir = None
+        self._temp_seq = 0
         self.tensors = [{}]
         self.kv_data = [{}]
         self.split_max_tensors = split_max_tensors
@@ -377,6 +380,44 @@ class GGUFWriter:
 
         self.tensors[-1][name] = TensorInfo(shape=tensor_shape, dtype=dtype, nbytes=tensor_nbytes)
 
+    def _ensure_temp_dir(self) -> Path:
+        # Per-tensor files on one directory (prefer GGUF_TEMP_DIR on the work
+        # drive). Avoids one giant spool (high commit + double disk peak).
+        if self.temp_dir is None:
+            base = os.environ.get("GGUF_TEMP_DIR") or tempfile.gettempdir()
+            d = Path(base) / f"gguf-tensors-{os.getpid()}"
+            d.mkdir(parents=True, exist_ok=True)
+            self.temp_dir = d
+        return self.temp_dir
+
+    @staticmethod
+    def _write_array_to_fp(fp: IO[bytes], tensor: Any) -> int:
+        # Chunked writes: Windows overflows int32 past 2GB in one write.
+        chunk = 512 * 1024 * 1024
+        if isinstance(tensor, np.ndarray):
+            arr = tensor if tensor.flags["C_CONTIGUOUS"] else np.ascontiguousarray(tensor)
+            mv = memoryview(arr).cast("B")
+            for i in range(0, arr.nbytes, chunk):
+                fp.write(mv[i:i + chunk])
+            return arr.nbytes
+        if type(tensor).__name__ == "LazyChunkedTensor":
+            start = fp.tell()
+            tensor.tofile(fp)
+            return fp.tell() - start
+        from .lazy import LazyNumpyTensor
+        if isinstance(tensor, LazyNumpyTensor):
+            arr = LazyNumpyTensor.to_eager(tensor)
+        else:
+            arr = np.asarray(tensor)
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        mv = memoryview(arr).cast("B")
+        for i in range(0, arr.nbytes, chunk):
+            fp.write(mv[i:i + chunk])
+        nbytes = arr.nbytes
+        del arr
+        return nbytes
+
     def add_tensor(
         self, name: str, tensor: np.ndarray[Any, Any], raw_shape: Sequence[int] | None = None,
         raw_dtype: GGMLQuantizationType | None = None, tensor_endianess: GGUFEndian | None = None
@@ -388,20 +429,52 @@ class GGUFWriter:
         if tensor_endianess != self.endianess:
             # Don't byteswap inplace since lazy copies cannot handle it
             tensor = tensor.byteswap(inplace=False)
-        if self.use_temp_file and self.temp_file is None:
-            fp = tempfile.SpooledTemporaryFile(mode="w+b", max_size=256 * 1024 * 1024)
-            fp.seek(0)
-            self.temp_file = fp
 
         shape: Sequence[int] = raw_shape if raw_shape is not None else tensor.shape
         self.add_tensor_info(name, shape, tensor.dtype, tensor.nbytes, raw_dtype=raw_dtype)
+        ti = self.tensors[-1][name]
 
-        if self.temp_file is None:
-            self.tensors[-1][name].tensor = tensor
+        if not self.use_temp_file:
+            ti.tensor = tensor
             return
 
-        tensor.tofile(self.temp_file)
-        self.write_padding(self.temp_file, tensor.nbytes)
+        tdir = self._ensure_temp_dir()
+        # Adopt an existing memmap file (engram staging) in place - cannot
+        # os.replace while the mapping is open; delete after flush instead.
+        if isinstance(tensor, np.memmap):
+            try:
+                tensor.flush()
+            except Exception:
+                pass
+            src = getattr(tensor, "filename", None)
+            if src and os.path.isfile(src) and os.path.getsize(src) >= tensor.nbytes:
+                ti.temp_path = str(src)
+                return
+
+        dest = tdir / f"{self._temp_seq:05d}_{name.replace('.', '_')}.bin"
+        self._temp_seq += 1
+        with open(dest, "wb") as fp:
+            written = self._write_array_to_fp(fp, tensor)
+            if written != ti.nbytes:
+                raise ValueError(f"{name}: wrote {written} bytes, expected {ti.nbytes}")
+        ti.temp_path = str(dest)
+        ti.tensor = None
+
+    def add_tensor_from_file(
+        self, name: str, path: str, byte_shape: Sequence[int],
+        raw_dtype: GGMLQuantizationType | None = None,
+    ) -> None:
+        # Register a prewritten byte buffer without mapping it into this process
+        # (Windows charges a full np.memmap to commit - 100GB+ engram tables).
+        nbytes = os.path.getsize(path)
+        self.add_tensor_info(name, byte_shape, np.dtype(np.uint8), nbytes, raw_dtype=raw_dtype)
+        ti = self.tensors[-1][name]
+        if ti.nbytes != nbytes:
+            raise ValueError(f"{name}: file {path} is {nbytes} bytes, expected {ti.nbytes}")
+        if not self.use_temp_file:
+            raise ValueError(f"{name}: add_tensor_from_file requires use_temp_file")
+        ti.temp_path = str(path)
+        ti.tensor = None
 
     def write_padding(self, fp: IO[bytes], n: int, align: int | None = None) -> None:
         pad = GGUFWriter.ggml_pad(n, align if align is not None else self.data_alignment) - n
@@ -448,7 +521,7 @@ class GGUFWriter:
         for fout in self.fout:
             self.write_padding(fout, fout.tell())
 
-        if self.temp_file is None:
+        if self.temp_dir is None:
             shard_bar = None
             bar = None
 
@@ -484,11 +557,35 @@ class GGUFWriter:
                     self.write_padding(fout, ti.nbytes)
                     ti.tensor = None
         else:
-            self.temp_file.seek(0)
-
-            shutil.copyfileobj(self.temp_file, self.fout[0 if not self.small_first_shard else 1])
+            # Stream each per-tensor temp into the output and delete it immediately
+            # so peak disk stays ~one model, not temp+output.
+            fout = self.fout[0 if not self.small_first_shard else 1]
+            for tensors in self.tensors:
+                for name, ti in tensors.items():
+                    if ti.temp_path is None:
+                        raise ValueError(f"tensor {name!r} missing temp_path")
+                    start = fout.tell()
+                    with open(ti.temp_path, "rb") as tf:
+                        shutil.copyfileobj(tf, fout, 1024 * 1024)
+                    if fout.tell() - start != ti.nbytes:
+                        raise ValueError(
+                            f"tensor {name!r} wrote {fout.tell() - start} bytes, expected {ti.nbytes}")
+                    self.write_padding(fout, ti.nbytes)
+                    try:
+                        os.remove(ti.temp_path)
+                    except OSError:
+                        pass
+                    ti.temp_path = None
             self.flush()
-            self.temp_file.close()
+            # best-effort cleanup of empty staging dir
+            try:
+                if self.temp_dir is not None and self.temp_dir.is_dir():
+                    for p in self.temp_dir.iterdir():
+                        p.unlink(missing_ok=True)
+                    self.temp_dir.rmdir()
+            except OSError:
+                pass
+            self.temp_dir = None
 
         self.state = WriterState.WEIGHTS
 
@@ -502,6 +599,14 @@ class GGUFWriter:
             for fout in self.fout:
                 fout.close()
             self.fout = None
+        if self.temp_dir is not None:
+            try:
+                for p in self.temp_dir.iterdir():
+                    p.unlink(missing_ok=True)
+                self.temp_dir.rmdir()
+            except OSError:
+                pass
+            self.temp_dir = None
 
     def add_type(self, type_name: str) -> None:
         self.add_string(Keys.General.TYPE, type_name)
