@@ -345,6 +345,11 @@ extern "C" {
         // the main file so the core file stays small (NULL/empty = disabled)
         const char * engram_file;
 
+        // path to a sidecar GGUF holding the full-precision Qwen PLE tensors
+        // (blk.*.ple_*); when set, they load from there instead of the main
+        // file (NULL/empty = disabled)
+        const char * ple_file;
+
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
         bool check_tensors;   // validate model tensor data

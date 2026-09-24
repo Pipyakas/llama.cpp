@@ -593,6 +593,10 @@ struct common_params {
     // names); lets the core file stay small while expert calibration iterates
     struct common_params_model engram_file;
 
+    // Qwen PLE sidecar: full-precision PLE tensors (blk.*.ple_*) in a separate
+    // GGUF so the core file can drop its embedded quantized PLE copy
+    struct common_params_model ple_file;
+
     // multimodal models (see tools/mtmd)
     struct common_params_model mmproj;
     bool mmproj_use_gpu = true;                 // use GPU for multimodal model
