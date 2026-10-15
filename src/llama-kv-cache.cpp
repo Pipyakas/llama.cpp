@@ -1477,7 +1477,7 @@ ggml_tensor * llama_kv_cache::build_input_k_rot(ggml_context * ctx) const {
     if (attn_rot_k && n_embd_head_k_all > 0) {
         int nrot = 64;
 
-        // TODO: investigate if using the smallest rotation matrix is beneficial also for K (similar as for V)
+        // TODO: investigate if using the smallest rotation matrix is beneficial also for K (similar
         // ref: https://github.com/ggml-org/llama.cpp/pull/21038#issuecomment-4141323088
         do {
             nrot *= 2;
@@ -1485,7 +1485,10 @@ ggml_tensor * llama_kv_cache::build_input_k_rot(ggml_context * ctx) const {
         nrot /= 2;
 
         res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nrot, nrot);
-    if (n_rot_k) {
+        ggml_set_input(res);
+        ggml_set_name(res, "attn_inp_k_rot");
+    } else if (n_rot_k) {
+        // upstream's path: a fixed-size rotation tensor where there is no all-heads search
         res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_rot_k, n_rot_k);
         ggml_set_input(res);
         ggml_set_name(res, "attn_inp_k_rot");
