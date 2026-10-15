@@ -1474,7 +1474,9 @@ ggml_tensor * llama_kv_cache::build_input_k_rot(ggml_context * ctx) const {
 
     // a cache with no layers leaves n_embd_head_k_all at 0, and every nrot divides 0, so the
     // search below would never end. there is nothing to rotate in that case anyway.
-    if (attn_rot_k && n_embd_head_k_all > 0) {
+    // NOTE: this used to read `attn_rot_k`, which was a local in the old constructor; the
+    // member is n_rot_k. Keeping the > 0 guard preserves the fork's infinite-loop fix.
+    if (n_rot_k > 0 && n_embd_head_k_all > 0) {
         int nrot = 64;
 
         // TODO: investigate if using the smallest rotation matrix is beneficial also for K (similar
