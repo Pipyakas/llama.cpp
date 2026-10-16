@@ -200,6 +200,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "MiniMaxM3SparseForConditionalGeneration": "minimax",
     "Ministral3ForCausalLM": "mistral3",
     "Mistral3ForConditionalGeneration": "mistral3",
+    "VoxtralRealtimeForConditionalGeneration": "mistral3",
     "MistralForCausalLM": "llama",
     "MixtralForCausalLM": "llama",
     "ModernBertDecisionModel": "bert",
@@ -384,6 +385,7 @@ MMPROJ_MODEL_MAP: dict[str, str] = {
     "UltravoxModel": "ultravox",
     "UnlimitedOCRForCausalLM": "deepseek",
     "VoxtralForConditionalGeneration": "ultravox",
+    "VoxtralRealtimeForConditionalGeneration": "ultravox",
     "YoutuVLForConditionalGeneration": "youtuvl",
 }
 
